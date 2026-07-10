@@ -1,0 +1,209 @@
+name: ai-trishul
+
+x-app: &app
+  image: ${TRISHUL_IMAGE:-ai-trishul:0.1.0}
+  restart: unless-stopped
+  read_only: true
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp:rw,noexec,nosuid,size=256m]
+  environment: &app-environment
+    DEBUG: "false"
+    ALLOWED_HOSTS: ${TRISHUL_HOSTNAME}
+    CSRF_TRUSTED_ORIGINS: https://${TRISHUL_HOSTNAME}
+    DB_HOST: postgres
+    DB_NAME: trishul
+    DB_USER: trishul_app
+    DB_PASSWORD_FILE: /run/secrets/db_app_password
+    DB_SSLMODE: disable
+    REDIS_HOST: redis
+    REDIS_PASSWORD_FILE: /run/secrets/redis_password
+    S3_ENDPOINT_URL: ${S3_ENDPOINT_URL}
+    S3_REGION: ${S3_REGION:-us-east-1}
+    S3_BUCKET: ${S3_BUCKET:-trishul}
+    S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
+    S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
+    S3_CA_BUNDLE: ${S3_CA_BUNDLE:-}
+    OIDC_ISSUER: ${OIDC_ISSUER}
+    OIDC_AUDIENCE: ${OIDC_AUDIENCE}
+    OIDC_JWKS_URL: ${OIDC_JWKS_URL}
+    OIDC_CLIENT_ID: ${OIDC_CLIENT_ID}
+    OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-}
+    OIDC_CA_BUNDLE: ${OIDC_CA_BUNDLE:-}
+    OIDC_MFA_REQUIRED: ${OIDC_MFA_REQUIRED:-true}
+    OIDC_MFA_ACR_VALUES: ${OIDC_MFA_ACR_VALUES:-}
+    DJANGO_SECRET_KEY_FILE: /run/secrets/django_secret_key
+    INTERNAL_AI_TOKEN_FILE: /run/secrets/internal_ai_token
+    METRICS_TOKEN_FILE: /run/secrets/metrics_token
+  secrets: &app-secrets
+    - db_app_password
+    - redis_password
+    - s3_access_key
+    - s3_secret_key
+    - django_secret_key
+    - internal_ai_token
+    - metrics_token
+  networks: [application, data]
+  depends_on:
+    migrate: { condition: service_completed_successfully }
+    redis: { condition: service_healthy }
+
+services:
+  edge:
+    image: ${TRISHUL_EDGE_IMAGE:-ai-trishul-edge:0.1.0}
+    build:
+      context: .
+      dockerfile: deploy/edge/Dockerfile
+    restart: unless-stopped
+    environment:
+      OIDC_BROWSER_ORIGIN: ${OIDC_BROWSER_ORIGIN}
+    read_only: true
+    user: "101:101"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:rw,noexec,nosuid,size=64m, /var/cache/nginx:rw,noexec,nosuid,size=64m]
+    ports: ["${HTTPS_PORT:-443}:8443"]
+    secrets: [tls_certificate, tls_private_key]
+    networks: [edge]
+    depends_on:
+      api: { condition: service_healthy }
+
+  api:
+    <<: *app
+    build:
+      context: .
+      target: app
+    networks: [edge, application, data]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health/live', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r, timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  worker:
+    <<: *app
+    command: [celery, -A, trishul, worker, --loglevel=INFO, --queues=default, "--concurrency=${WORKER_CONCURRENCY:-2}"]
+    stop_grace_period: 2m
+
+  scheduler:
+    <<: *app
+    command: [celery, -A, trishul, beat, --loglevel=INFO, --schedule=/tmp/celerybeat-schedule]
+
+  ai-gateway:
+    <<: *app
+    command: [gunicorn, trishul.wsgi:application, --bind=0.0.0.0:8000, --workers=2, --timeout=120, --graceful-timeout=30]
+    networks: [application, data, model]
+    secrets:
+      - db_app_password
+      - redis_password
+      - s3_access_key
+      - s3_secret_key
+      - django_secret_key
+      - internal_ai_token
+      - metrics_token
+      - ai_endpoint_credential
+    environment:
+      <<: *app-environment
+      AI_ENDPOINT_ALLOWLIST: ${AI_ENDPOINT_ALLOWLIST}
+
+  analysis-controller:
+    <<: *app
+    image: ${TRISHUL_CONTROLLER_IMAGE:-ai-trishul-controller:0.1.0}
+    build:
+      context: .
+      target: controller
+    command: [celery, -A, trishul, worker, --loglevel=INFO, --queues=analysis, "--concurrency=${ANALYSIS_CONCURRENCY:-1}"]
+    environment:
+      <<: *app-environment
+      DOCKER_HOST: unix:///run/oci.sock
+      OCI_CLI: docker
+      ANALYZER_IMAGE: ${TRISHUL_ANALYZER_IMAGE}
+    volumes:
+      - type: bind
+        source: ${ROOTLESS_OCI_SOCKET}
+        target: /run/oci.sock
+        read_only: false
+    stop_grace_period: 35m
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: [python, manage.py, migrate, --noinput]
+    environment:
+      <<: *app-environment
+      DB_USER: trishul_owner
+      DB_PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets:
+      - db_owner_password
+      - redis_password
+      - s3_access_key
+      - s3_secret_key
+      - django_secret_key
+      - internal_ai_token
+      - metrics_token
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  postgres:
+    image: postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trishul
+      POSTGRES_USER: trishul_owner
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets: [db_owner_password, db_app_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-app-role.sh:/docker-entrypoint-initdb.d/10-app-role.sh:ro
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U trishul_owner -d trishul"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+
+  redis:
+    image: redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd
+    restart: unless-stopped
+    entrypoint: [/bin/sh, /usr/local/bin/entrypoint.sh]
+    user: "999:999"
+    secrets: [redis_password]
+    volumes:
+      - redis_data:/data
+      - ./deploy/redis/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+    tmpfs: [/run/redis:rw,noexec,nosuid,size=1m,uid=999,gid=999]
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, "redis-cli --no-auth-warning -a \"$$(cat /run/secrets/redis_password)\" ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  edge: { internal: false }
+  application: { internal: true }
+  data: { internal: true }
+  model: { internal: false }
+
+volumes:
+  postgres_data:
+  redis_data:
+
+secrets:
+  db_owner_password: { file: ./secrets/db_owner_password }
+  db_app_password: { file: ./secrets/db_app_password }
+  redis_password: { file: ./secrets/redis_password }
+  s3_access_key: { file: ./secrets/s3_access_key }
+  s3_secret_key: { file: ./secrets/s3_secret_key }
+  django_secret_key: { file: ./secrets/django_secret_key }
+  internal_ai_token: { file: ./secrets/internal_ai_token }
+  metrics_token: { file: ./secrets/metrics_token }
+  ai_endpoint_credential: { file: ./secrets/ai_endpoint_credential }
+  tls_certificate: { file: ./secrets/tls.crt }
+  tls_private_key: { file: ./secrets/tls.key }

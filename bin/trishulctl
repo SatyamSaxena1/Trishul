@@ -1,0 +1,137 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+COMPOSE="docker compose --project-directory $ROOT --env-file $ROOT/.env -f $ROOT/compose.yaml"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+doctor() {
+    need docker
+    docker compose version >/dev/null
+    [ -f "$ROOT/.env" ] || die "copy .env.example to .env and configure it"
+    set -a; . "$ROOT/.env"; set +a
+    [ -n "${TRISHUL_HOSTNAME:-}" ] || die "TRISHUL_HOSTNAME is required"
+    [ -n "${ROOTLESS_OCI_SOCKET:-}" ] || die "ROOTLESS_OCI_SOCKET is required"
+    case "$ROOTLESS_OCI_SOCKET" in
+        /var/run/docker.sock|/run/docker.sock) die "rootful Docker sockets are unsupported" ;;
+    esac
+    [ -S "$ROOTLESS_OCI_SOCKET" ] || die "rootless OCI socket does not exist: $ROOTLESS_OCI_SOCKET"
+    for file in db_owner_password db_app_password redis_password s3_access_key s3_secret_key django_secret_key internal_ai_token metrics_token ai_endpoint_credential backup_key tls.crt tls.key; do
+        path="$ROOT/secrets/$file"
+        [ -s "$path" ] || die "missing secret: secrets/$file"
+        mode="$(stat -c '%a' "$path")"
+        [ "$mode" -le 600 ] || die "secrets/$file must have mode 0600 or stricter"
+    done
+    $COMPOSE config --quiet
+    available_kb="$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')"
+    [ "$available_kb" -ge 10485760 ] || die "at least 10 GiB free disk is required"
+    info "AI Trishul deployment prerequisites passed"
+}
+
+wait_ready() {
+    attempts=0
+    while [ "$attempts" -lt 60 ]; do
+        if $COMPOSE exec -T api python -c "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health/ready', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r, timeout=3)" >/dev/null 2>&1; then
+            info "AI Trishul is ready"
+            return
+        fi
+        attempts=$((attempts + 1))
+        sleep 2
+    done
+    $COMPOSE ps
+    die "readiness deadline exceeded"
+}
+
+up() { doctor; $COMPOSE up -d --remove-orphans; wait_ready; }
+down() { $COMPOSE down; }
+status() { $COMPOSE ps; }
+logs() { $COMPOSE logs --tail=200 "${2:-}"; }
+
+bootstrap() {
+    [ "$#" -eq 5 ] || die "usage: trishulctl bootstrap OIDC_SUBJECT EMAIL TENANT_SLUG TENANT_NAME"
+    $COMPOSE run --rm migrate python manage.py bootstrap_tenant \
+        --subject "$2" --email "$3" --tenant-slug "$4" --tenant-name "$5"
+}
+
+backup() {
+    need sha256sum
+    timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    destination="$ROOT/backups/$timestamp"
+    mkdir -m 700 "$destination"
+    plain="$destination/database.dump"
+    resume=true
+    trap '$resume && $COMPOSE start api worker scheduler ai-gateway analysis-controller edge >/dev/null 2>&1 || true' EXIT INT TERM
+    $COMPOSE stop edge worker scheduler ai-gateway analysis-controller api
+    $COMPOSE exec -T postgres pg_dump --username=trishul_owner --dbname=trishul --format=custom > "$plain"
+    $COMPOSE run --rm -T --no-deps \
+        -v "$destination:/backup" -v "$ROOT/secrets/backup_key:/run/secrets/backup_key:ro" \
+        migrate python -m core.backup encrypt /backup/database.dump /backup/database.dump.enc
+    $COMPOSE run --rm -T --no-deps migrate python manage.py export_backup_manifest > "$destination/manifest.json"
+    rm -f "$plain"
+    (cd "$destination" && sha256sum database.dump.enc manifest.json > SHA256SUMS)
+    chmod -R go-rwx "$destination"
+    $COMPOSE start api worker scheduler ai-gateway analysis-controller edge
+    resume=false
+    trap - EXIT INT TERM
+    info "Encrypted backup created: $destination"
+}
+
+restore() {
+    [ "${3:-}" = "--confirm-restore" ] || die "usage: trishulctl restore BACKUP_DIRECTORY --confirm-restore"
+    source_dir="$(CDPATH= cd -- "$2" && pwd)"
+    (cd "$source_dir" && sha256sum -c SHA256SUMS)
+    plain="$source_dir/database.restore.dump"
+    trap 'rm -f "$plain"' EXIT INT TERM
+    $COMPOSE stop edge api worker scheduler ai-gateway analysis-controller
+    $COMPOSE run --rm -T --no-deps \
+        -v "$source_dir:/backup" -v "$ROOT/secrets/backup_key:/run/secrets/backup_key:ro" \
+        migrate python -m core.backup decrypt /backup/database.dump.enc /backup/database.restore.dump
+    $COMPOSE exec -T postgres pg_restore --username=trishul_owner --dbname=trishul --clean --if-exists --no-owner < "$plain"
+    rm -f "$plain"
+    $COMPOSE run --rm migrate python manage.py migrate --noinput
+    $COMPOSE run --rm migrate python manage.py verify_audit
+    $COMPOSE up -d --remove-orphans
+    wait_ready
+    trap - EXIT INT TERM
+}
+
+upgrade() {
+    backup
+    $COMPOSE pull --ignore-buildable
+    $COMPOSE run --rm migrate python manage.py migrate --noinput
+    $COMPOSE up -d --remove-orphans
+    wait_ready
+}
+
+bundle() {
+    need sha256sum; need openssl
+    [ -n "${RELEASE_SIGNING_KEY:-}" ] || die "RELEASE_SIGNING_KEY must name an Ed25519 or RSA private key"
+    set -a; . "$ROOT/.env"; set +a
+    destination="${2:-$ROOT/release/ai-trishul-offline}"
+    mkdir -p "$destination/images"
+    images="${TRISHUL_IMAGE} ${TRISHUL_EDGE_IMAGE} ${TRISHUL_CONTROLLER_IMAGE} ${TRISHUL_ANALYZER_IMAGE} postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94 redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd"
+    docker save $images -o "$destination/images/images.tar"
+    cp "$ROOT/compose.yaml" "$ROOT/.env.example" "$destination/"
+    cp -R "$ROOT/bin" "$ROOT/deploy" "$ROOT/docs" "$destination/"
+    (cd "$destination" && find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+    openssl dgst -sha256 -sign "$RELEASE_SIGNING_KEY" -out "$destination/SHA256SUMS.sig" "$destination/SHA256SUMS"
+    openssl pkey -in "$RELEASE_SIGNING_KEY" -pubout -out "$destination/release-public-key.pem"
+    info "Offline bundle created: $destination"
+}
+
+case "${1:-}" in
+    doctor) doctor ;;
+    up|install) up ;;
+    down) down ;;
+    status) status ;;
+    logs) logs "$@" ;;
+    bootstrap) bootstrap "$@" ;;
+    backup) backup ;;
+    restore) restore "$@" ;;
+    upgrade) upgrade ;;
+    bundle) bundle "$@" ;;
+    *) die "usage: trishulctl {doctor|install|up|down|status|logs|bootstrap|backup|restore|upgrade|bundle}" ;;
+esac

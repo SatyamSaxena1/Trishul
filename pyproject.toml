@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "trishul.settings_test"
+pythonpath = ["backend"]
+testpaths = ["backend/core/tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = ["backend/core/migrations"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "S", "B"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"backend/core/tests/*" = ["S105", "S106"]
+"backend/trishul/settings_test.py" = ["E402", "F403", "S105"]

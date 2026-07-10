@@ -1,0 +1,13 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: trishul
+  namespace: ai-trishul
+spec:
+  host: trishul.example.internal
+  to: { kind: Service, name: trishul-edge }
+  port: { targetPort: http }
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+

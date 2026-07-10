@@ -1,0 +1,58 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: dns-egress }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: ingress-to-edge }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: trishul-edge } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: openshift-ingress } }
+      ports: [{ protocol: TCP, port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: edge-to-api }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: trishul-api } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ podSelector: { matchLabels: { app.kubernetes.io/name: trishul-edge } } }]
+      ports: [{ protocol: TCP, port: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: internal-egress }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: trishul-edge } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app.kubernetes.io/name: trishul-api } } }]
+      ports: [{ protocol: TCP, port: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: analyzer-no-egress }
+spec:
+  podSelector: { matchLabels: { trishul.ai/role: analyzer } }
+  policyTypes: [Ingress, Egress]
+

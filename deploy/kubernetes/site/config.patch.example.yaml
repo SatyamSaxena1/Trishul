@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trishul-config
+  namespace: ai-trishul
+data:
+  ALLOWED_HOSTS: trishul.customer.example
+  CSRF_TRUSTED_ORIGINS: https://trishul.customer.example
+  DB_HOST: postgres.customer.example
+  REDIS_HOST: redis.customer.example
+  S3_ENDPOINT_URL: https://objects.customer.example
+  OIDC_ISSUER: https://identity.customer.example
+  OIDC_JWKS_URL: https://identity.customer.example/.well-known/jwks.json
+  AI_ENDPOINT_ALLOWLIST: models.customer.example
+  KUBE_TRANSFER_IMAGE: registry.customer.internal/ai-trishul@sha256:REPLACE_WITH_64_HEX_CHARACTERS
+  ANALYZER_IMAGE: registry.customer.internal/ai-trishul-analyzer@sha256:REPLACE_WITH_64_HEX_CHARACTERS

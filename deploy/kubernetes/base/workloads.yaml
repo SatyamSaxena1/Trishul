@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata: { name: trishul-api }
+    spec:
+      replicas: 3
+      selector: { matchLabels: { app.kubernetes.io/name: trishul-api } }
+      template:
+        metadata: { labels: { app.kubernetes.io/name: trishul-api } }
+        spec:
+          serviceAccountName: trishul-api
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 60
+          securityContext: &podSecurity { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+          containers:
+            - &appContainer
+              name: api
+              image: &appImage registry.example.internal/ai-trishul@sha256:0000000000000000000000000000000000000000000000000000000000000000
+              imagePullPolicy: IfNotPresent
+              envFrom: [{ configMapRef: { name: trishul-config } }]
+              ports: [{ name: http, containerPort: 8000 }]
+              livenessProbe:
+                httpGet: { path: /api/v1/health/live, port: http, httpHeaders: [{ name: X-Forwarded-Proto, value: https }] }
+                initialDelaySeconds: 10
+              readinessProbe:
+                httpGet: { path: /api/v1/health/ready, port: http, httpHeaders: [{ name: X-Forwarded-Proto, value: https }] }
+                initialDelaySeconds: 10
+              resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
+              securityContext: &containerSecurity
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+              volumeMounts: &appMounts
+                - { name: runtime-secrets, mountPath: /run/secrets, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes: &appVolumes
+            - name: runtime-secrets
+              secret: { secretName: trishul-runtime-secrets, defaultMode: 0444 }
+            - name: tmp
+              emptyDir: { sizeLimit: 256Mi }
+          topologySpreadConstraints: &spread
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: ScheduleAnyway
+              labelSelector: { matchLabels: { app.kubernetes.io/name: trishul-api } }
+  - apiVersion: v1
+    kind: Service
+    metadata: { name: trishul-api }
+    spec:
+      selector: { app.kubernetes.io/name: trishul-api }
+      ports: [{ name: http, port: 8000, targetPort: http }]
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata: { name: trishul-worker }
+    spec:
+      replicas: 2
+      selector: { matchLabels: { app.kubernetes.io/name: trishul-worker } }
+      template:
+        metadata: { labels: { app.kubernetes.io/name: trishul-worker } }
+        spec:
+          serviceAccountName: trishul-worker
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 120
+          securityContext: *podSecurity
+          containers:
+            - <<: *appContainer
+              name: worker
+              command: [celery, -A, trishul, worker, --loglevel=INFO, --queues=default, --concurrency=2, --hostname=worker@%h]
+              ports: []
+              livenessProbe: null
+              readinessProbe: null
+              resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { cpu: "2", memory: 2Gi } }
+          volumes: *appVolumes
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata: { name: trishul-scheduler }
+    spec:
+      replicas: 1
+      selector: { matchLabels: { app.kubernetes.io/name: trishul-scheduler } }
+      template:
+        metadata: { labels: { app.kubernetes.io/name: trishul-scheduler } }
+        spec:
+          serviceAccountName: trishul-worker
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 60
+          securityContext: *podSecurity
+          containers:
+            - <<: *appContainer
+              name: scheduler
+              command: [celery, -A, trishul, beat, --loglevel=INFO, --schedule=/tmp/celerybeat-schedule]
+              ports: []
+              livenessProbe: null
+              readinessProbe: null
+              resources: { requests: { cpu: 50m, memory: 128Mi }, limits: { cpu: 500m, memory: 512Mi } }
+          volumes: *appVolumes
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata: { name: trishul-ai-gateway }
+    spec:
+      replicas: 2
+      selector: { matchLabels: { app.kubernetes.io/name: trishul-ai-gateway } }
+      template:
+        metadata: { labels: { app.kubernetes.io/name: trishul-ai-gateway } }
+        spec:
+          serviceAccountName: trishul-worker
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 60
+          securityContext: *podSecurity
+          containers:
+            - <<: *appContainer
+              name: ai-gateway
+              command: [gunicorn, trishul.wsgi:application, --bind=0.0.0.0:8000, --workers=2, --timeout=120, --graceful-timeout=30]
+              volumeMounts:
+                - { name: runtime-secrets, mountPath: /run/secrets, readOnly: true }
+                - { name: ai-credential, mountPath: /run/secrets/ai_endpoint_credential, subPath: credential, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: runtime-secrets
+              secret: { secretName: trishul-runtime-secrets, defaultMode: 0444 }
+            - name: ai-credential
+              secret: { secretName: trishul-ai-credential, defaultMode: 0444 }
+            - name: tmp
+              emptyDir: { sizeLimit: 256Mi }
+  - apiVersion: v1
+    kind: Service
+    metadata: { name: trishul-ai-gateway }
+    spec:
+      selector: { app.kubernetes.io/name: trishul-ai-gateway }
+      ports: [{ name: http, port: 8000, targetPort: http }]
+  - apiVersion: apps/v1
+    kind: Deployment
+    metadata: { name: trishul-analysis-controller }
+    spec:
+      replicas: 2
+      selector: { matchLabels: { app.kubernetes.io/name: trishul-analysis-controller } }
+      template:
+        metadata: { labels: { app.kubernetes.io/name: trishul-analysis-controller } }
+        spec:
+          serviceAccountName: trishul-analysis-controller
+          automountServiceAccountToken: true
+          terminationGracePeriodSeconds: 2100
+          securityContext: *podSecurity
+          containers:
+            - <<: *appContainer
+              name: analysis-controller
+              command: [celery, -A, trishul, worker, --loglevel=INFO, --queues=analysis, --concurrency=1, --hostname=analysis@%h]
+              ports: []
+              livenessProbe: null
+              readinessProbe: null
+              resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { cpu: "1", memory: 1Gi } }
+          volumes: *appVolumes

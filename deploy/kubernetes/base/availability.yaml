@@ -1,0 +1,44 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: trishul-api }
+spec:
+  minAvailable: 2
+  selector: { matchLabels: { app.kubernetes.io/name: trishul-api } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: trishul-edge }
+spec:
+  minAvailable: 1
+  selector: { matchLabels: { app.kubernetes.io/name: trishul-edge } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: trishul-api }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: trishul-api }
+  minReplicas: 3
+  maxReplicas: 10
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 300 }
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: trishul-worker }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: trishul-worker }
+  minReplicas: 2
+  maxReplicas: 20
+  behavior:
+    scaleDown: { stabilizationWindowSeconds: 300 }
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+

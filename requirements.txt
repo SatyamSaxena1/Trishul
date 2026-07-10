@@ -1,0 +1,13 @@
+Django==6.0.7
+djangorestframework==3.17.1
+celery==5.6.3
+redis==8.0.1
+psycopg[binary]==3.3.4
+PyJWT[crypto]==2.12.1
+cryptography==45.0.7
+httpx==0.28.1
+boto3==1.40.70
+jsonschema==4.25.1
+gunicorn==23.0.0
+prometheus-client==0.23.1
+

@@ -1,0 +1,92 @@
+#!/bin/sh
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+NAMESPACE="${TRISHUL_NAMESPACE:-ai-trishul}"
+PROFILE="${TRISHUL_KUBE_PROFILE:-base}"
+KUSTOMIZE="${TRISHUL_KUSTOMIZE_DIR:-$ROOT/deploy/kubernetes/$PROFILE}"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*"; }
+need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+
+validate_image() {
+    printf '%s\n' "${TRISHUL_IMAGE:-}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$' ||
+        die "TRISHUL_IMAGE must be an OCI image pinned by sha256 digest"
+}
+
+render() {
+    need kubectl
+    [ -f "$KUSTOMIZE/kustomization.yaml" ] || die "unknown profile: $PROFILE"
+    kubectl kustomize "$KUSTOMIZE"
+}
+
+doctor() {
+    need kubectl
+    validate_image
+    kubectl version --client >/dev/null
+    kubectl cluster-info >/dev/null
+    kubectl auth can-i create deployments.apps -n "$NAMESPACE" | grep -qx yes || die "cannot create deployments"
+    kubectl auth can-i create jobs.batch -n "$NAMESPACE" | grep -qx yes || die "cannot create migration jobs"
+    rendered="$(render)"
+    printf '%s\n' "$rendered" | grep -q 'sha256:000000000000' && die "replace all placeholder image digests"
+    kubectl get secret trishul-runtime-secrets -n "$NAMESPACE" >/dev/null 2>&1 || die "trishul-runtime-secrets is missing"
+    kubectl get secret trishul-ai-credential -n "$NAMESPACE" >/dev/null 2>&1 || die "trishul-ai-credential is missing"
+    [ -n "${TRISHUL_CONFIG_PATCH:-}" ] || die "TRISHUL_CONFIG_PATCH must name the customer configuration patch"
+    [ -f "$TRISHUL_CONFIG_PATCH" ] || die "configuration patch not found: $TRISHUL_CONFIG_PATCH"
+    [ -n "${TRISHUL_EGRESS_POLICY:-}" ] || die "TRISHUL_EGRESS_POLICY must name the customer-reviewed egress policy"
+    [ -f "$TRISHUL_EGRESS_POLICY" ] || die "egress policy not found: $TRISHUL_EGRESS_POLICY"
+    info "AI Trishul Kubernetes prerequisites passed"
+}
+
+migrate() {
+    need kubectl
+    validate_image
+    template="$ROOT/deploy/kubernetes/jobs/migrate.yaml"
+    job="$(sed "s|TRISHUL_APP_IMAGE|$TRISHUL_IMAGE|g" "$template" | kubectl create -f - -o name)"
+    kubectl wait --for=condition=complete --timeout=15m "$job" -n "$NAMESPACE" || {
+        kubectl logs "$job" -n "$NAMESPACE" --all-containers=true || true
+        die "database migration failed"
+    }
+    info "Database migration completed: $job"
+}
+
+rollout() {
+    for deployment in trishul-api trishul-worker trishul-scheduler trishul-ai-gateway trishul-analysis-controller trishul-edge; do
+        kubectl rollout status "deployment/$deployment" -n "$NAMESPACE" --timeout=10m
+    done
+}
+
+install() {
+    doctor
+    kubectl apply -f "$ROOT/deploy/kubernetes/base/namespace.yaml"
+    kubectl apply -f "$ROOT/deploy/kubernetes/base/config.yaml" -n "$NAMESPACE"
+    kubectl patch configmap trishul-config -n "$NAMESPACE" --type merge --patch-file "$TRISHUL_CONFIG_PATCH"
+    kubectl apply -f "$ROOT/deploy/kubernetes/base/rbac.yaml" -n "$NAMESPACE"
+    kubectl apply -f "$TRISHUL_EGRESS_POLICY" -n "$NAMESPACE"
+    migrate
+    render | kubectl apply -f -
+    kubectl apply -f "$TRISHUL_EGRESS_POLICY" -n "$NAMESPACE"
+    rollout
+}
+
+upgrade() {
+    doctor
+    info "Confirm the external PostgreSQL and object-store backup checkpoint exists before continuing."
+    [ "${TRISHUL_BACKUP_CONFIRMED:-}" = "yes" ] || die "set TRISHUL_BACKUP_CONFIRMED=yes after verifying the backup"
+    migrate
+    render | kubectl apply -f -
+    kubectl apply -f "$TRISHUL_EGRESS_POLICY" -n "$NAMESPACE"
+    rollout
+}
+
+case "${1:-}" in
+    doctor) doctor ;;
+    render) render ;;
+    migrate) migrate ;;
+    install) install ;;
+    upgrade) upgrade ;;
+    status) kubectl get deployments,pods,jobs,hpa,pdb -n "$NAMESPACE" ;;
+    logs) kubectl logs -n "$NAMESPACE" "${2:?usage: trishulkube logs RESOURCE}" --all-containers=true --tail=200 ;;
+    *) die "usage: trishulkube {doctor|render|migrate|install|upgrade|status|logs RESOURCE}" ;;
+esac

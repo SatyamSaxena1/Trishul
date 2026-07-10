@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: approved-external-egress
+  namespace: ai-trishul
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: ai-trishul
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock: { cidr: 192.0.2.10/32 }
+      ports: [{ protocol: TCP, port: 5432 }]
+    - to:
+        - ipBlock: { cidr: 192.0.2.11/32 }
+      ports: [{ protocol: TCP, port: 6379 }]
+    - to:
+        - ipBlock: { cidr: 192.0.2.12/32 }
+        - ipBlock: { cidr: 192.0.2.13/32 }
+        - ipBlock: { cidr: 192.0.2.14/32 }
+      ports: [{ protocol: TCP, port: 443 }]
