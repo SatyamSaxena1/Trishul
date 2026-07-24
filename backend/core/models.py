@@ -209,9 +209,22 @@ class AuditEvent(TenantScopedModel):
 
 
 class Repository(TenantScopedModel):
+    class SourceType(models.TextChoices):
+        UPLOAD = "upload", "Upload"
+        GITHUB = "github", "GitHub"
+        GITLAB = "gitlab", "GitLab"
+
     application = models.ForeignKey(Application, on_delete=models.PROTECT)
     name = models.CharField(max_length=200)
-    source_type = models.CharField(max_length=30, default="upload")
+    source_type = models.CharField(max_length=30, choices=SourceType.choices, default=SourceType.UPLOAD)
+    clone_url = models.URLField(max_length=600, blank=True)
+    external_id = models.CharField(max_length=200, blank=True)
+    default_branch = models.CharField(max_length=200, default="main")
+    installation_id = models.CharField(max_length=100, blank=True)
+    credential_ciphertext = models.TextField(blank=True)
+    status_credential_ciphertext = models.TextField(blank=True)
+    webhook_secret_ciphertext = models.TextField(blank=True)
+    ci_secret_ciphertext = models.TextField(blank=True)
 
     class Meta:
         constraints = [
@@ -226,10 +239,15 @@ class RepositoryVersion(TenantScopedModel):
     size = models.PositiveBigIntegerField()
     manifest = models.JSONField(default=dict)
     immutable = models.BooleanField(default=True)
+    commit_sha = models.CharField(max_length=64, blank=True)
+    ref = models.CharField(max_length=300, blank=True)
+    source_event = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["tenant", "repository", "sha256"], name="repository_version_hash_uniq")
+            models.UniqueConstraint(
+                fields=["tenant", "repository", "sha256", "commit_sha"], name="repository_version_source_uniq"
+            )
         ]
 
 
@@ -263,6 +281,7 @@ class Scan(TenantScopedModel):
     language_pack = models.CharField(max_length=100)
     language_pack_version = models.CharField(max_length=40)
     coverage = models.JSONField(default=dict)
+    result_object_key = models.CharField(max_length=600, blank=True)
 
 
 class Finding(TenantScopedModel):
@@ -297,12 +316,49 @@ class Finding(TenantScopedModel):
 
 
 class FindingEvidence(TenantScopedModel):
+    class Type(models.TextChoices):
+        SOURCE = "source", "Source"
+        DEPENDENCY = "dependency", "Dependency"
+        HTTP = "http", "HTTP"
+        CONFIGURATION = "configuration", "Configuration"
+        TEST = "test", "Test"
+
     finding = models.ForeignKey(Finding, on_delete=models.PROTECT, related_name="evidence")
-    file_path = models.CharField(max_length=600)
-    start_line = models.PositiveIntegerField()
-    end_line = models.PositiveIntegerField()
-    snippet_hash = models.CharField(max_length=64)
+    evidence_type = models.CharField(max_length=30, choices=Type.choices, default=Type.SOURCE)
+    location = models.JSONField(default=dict, blank=True)
+    file_path = models.CharField(max_length=600, blank=True)
+    start_line = models.PositiveIntegerField(default=0)
+    end_line = models.PositiveIntegerField(default=0)
+    snippet_hash = models.CharField(max_length=64, blank=True)
     object_key = models.CharField(max_length=600, blank=True)
+
+
+class StagingTarget(TenantScopedModel):
+    application = models.ForeignKey(Application, on_delete=models.PROTECT, related_name="staging_targets")
+    url = models.URLField(max_length=600)
+    approved = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "application", "url"], name="staging_target_url_uniq")
+        ]
+
+
+class WebhookDelivery(TenantScopedModel):
+    repository = models.ForeignKey(Repository, on_delete=models.PROTECT)
+    provider = models.CharField(max_length=20)
+    delivery_id = models.CharField(max_length=200)
+    commit_sha = models.CharField(max_length=64)
+    ref = models.CharField(max_length=300, blank=True)
+    event = models.CharField(max_length=80)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "repository", "provider", "delivery_id"],
+                name="webhook_delivery_repository_uniq",
+            )
+        ]
 
 
 class ThreatModel(TenantScopedModel):

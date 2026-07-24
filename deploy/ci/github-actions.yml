@@ -1,0 +1,41 @@
+name: Trishul advisory scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  trishul:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 1 }
+      # Run this repository's existing build and test steps before this point.
+      - name: Upload immutable source and queue offline scans
+        env:
+          TRISHUL_URL: ${{ secrets.TRISHUL_URL }}
+          TRISHUL_TOKEN: ${{ secrets.TRISHUL_TOKEN }}
+          TRISHUL_REPOSITORY_ID: ${{ secrets.TRISHUL_REPOSITORY_ID }}
+          TRISHUL_CI_SECRET: ${{ secrets.TRISHUL_CI_SECRET }}
+          STAGING_URL: ${{ vars.TRISHUL_STAGING_URL }}
+        run: |
+          git archive --format=tar --output=source.tar "$GITHUB_SHA"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $TRISHUL_TOKEN" \
+            -F "archive=@source.tar" -F "commit_sha=$GITHUB_SHA" -F "ref=$GITHUB_REF" \
+            "$TRISHUL_URL/api/v1/repositories/$TRISHUL_REPOSITORY_ID/imports/" > version.json
+          VERSION_ID="$(python -c "import json; print(json.load(open('version.json'))['id'])")"
+          for PACK in semgrep trivy; do
+            curl --fail --silent --show-error \
+              -H "Authorization: Bearer $TRISHUL_TOKEN" -H "Content-Type: application/json" \
+              -d "{\"repository_version\":\"$VERSION_ID\",\"language_pack\":\"$PACK\",\"language_pack_version\":\"1.0\"}" \
+              "$TRISHUL_URL/api/v1/scans/" >/dev/null
+          done
+          if [ -n "${STAGING_URL:-}" ]; then
+            sh deploy/ci/run-zap.sh "$STAGING_URL" "$GITHUB_SHA" "$VERSION_ID"
+          fi
+      # Convert the repository's JUnit file with scripts/trishul_ci_bundle.py and upload it
+      # with scripts/trishul_ci_upload.py in the same way when its location is known.

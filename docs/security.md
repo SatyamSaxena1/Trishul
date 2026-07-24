@@ -24,11 +24,18 @@ Only the AI gateway receives endpoint credentials and model-network access. Endp
 
 ## Analysis boundary
 
+The repository fetcher validates signed, replay-protected GitHub/GitLab events and fetches only an exact
+commit SHA with hooks, submodules, LFS, and interactive credentials disabled. GitLab clone tokens are
+encrypted to a public key in the API and can be decrypted only by the fetcher. The fetcher creates the same
+bounded immutable archive used by manual and CI uploads; provider credentials never enter analyzer jobs.
+
 The controller refuses `/var/run/docker.sock` operationally. It uses a dedicated rootless runtime account and launches analyzer images by digest outside development. Job containers receive one repository archive and one output volume, no network, no application/database/model secrets, and bounded CPU, memory, PIDs, storage, and time.
 
 On Kubernetes, the controller has namespace-scoped permission only to create, read, and delete Jobs and scratch PVCs. Separate staging and collection Jobs use short-lived presigned object URLs; the analyzer Job receives neither URLs nor service-account credentials and is selected by an explicit no-network policy. Access to Job specifications must remain limited because staging URLs are usable until their short expiry.
 
-The MVP never runs repository scripts, builds, tests, package installation, or dependency hooks.
+The MVP never runs repository scripts, builds, tests, package installation, or dependency hooks. CI may
+submit HMAC-signed JUnit and approved-staging ZAP summaries; evidence is bounded and external findings
+remain human-validation candidates.
 
 ## Known residual risks
 

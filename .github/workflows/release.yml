@@ -1,0 +1,60 @@
+name: Release images
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: production-release
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Authenticate to internal registry
+        env:
+          REGISTRY: ${{ vars.TRISHUL_REGISTRY }}
+          USERNAME: ${{ secrets.TRISHUL_REGISTRY_USERNAME }}
+          PASSWORD: ${{ secrets.TRISHUL_REGISTRY_PASSWORD }}
+        run: echo "$PASSWORD" | docker login "$REGISTRY" --username "$USERNAME" --password-stdin
+      - name: Build and push immutable images
+        env:
+          PREFIX: ${{ vars.TRISHUL_IMAGE_PREFIX }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          build() {
+            name="$1"; shift
+            docker buildx build --push --metadata-file "$name.json" -t "$PREFIX-$name:$VERSION" "$@" .
+            digest="$(python -c "import json; print(json.load(open('$name.json'))['containerimage.digest'])")"
+            printf '%s@%s\n' "$PREFIX-$name" "$digest" >> release-manifest.txt
+          }
+          build app --target app
+          build controller --target controller
+          build fetcher --target fetcher
+          build analyzer -f analyzer/Dockerfile
+          build edge -f deploy/edge/Dockerfile
+      - name: Block critical image vulnerabilities
+        run: |
+          while read -r image; do
+            docker run --rm -v "$HOME/.docker:/root/.docker:ro" \
+              aquasec/trivy:0.67.2@sha256:e2b22eac59c02003d8749f5b8d9bd073b62e30fefaef5b7c8371204e0a4b0c08 \
+              image --severity CRITICAL --exit-code 1 --ignore-unfixed "$image"
+          done < release-manifest.txt
+      - name: Sign release manifest
+        env:
+          SIGNING_KEY: ${{ secrets.TRISHUL_RELEASE_SIGNING_KEY }}
+        run: |
+          printf '%s' "$SIGNING_KEY" > release-signing-key.pem
+          openssl dgst -sha256 -sign release-signing-key.pem -out release-manifest.sig release-manifest.txt
+          rm -f release-signing-key.pem
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ai-trishul-${{ github.ref_name }}
+          path: |
+            release-manifest.txt
+            release-manifest.sig
+          if-no-files-found: error

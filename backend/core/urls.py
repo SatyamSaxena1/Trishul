@@ -1,7 +1,17 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from .views import MODEL_VIEWSETS, ai_invoke, context, live, metrics, oidc_config, oidc_metadata, ready
+from .views import (
+    MODEL_VIEWSETS,
+    ai_invoke,
+    context,
+    live,
+    metrics,
+    oidc_config,
+    oidc_metadata,
+    ready,
+    repository_webhook,
+)
 
 router = DefaultRouter()
 for prefix, viewset in MODEL_VIEWSETS.items():
@@ -15,5 +25,10 @@ urlpatterns = [
     path("health/ready", ready),
     path("metrics", metrics),
     path("internal/ai/invoke", ai_invoke),
+    path(
+        "webhooks/<str:provider>/<uuid:tenant_id>/<uuid:repository_id>",
+        repository_webhook,
+        name="repository-webhook",
+    ),
     *router.urls,
 ]

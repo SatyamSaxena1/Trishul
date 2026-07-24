@@ -1,0 +1,66 @@
+rules:
+  - id: TRISHUL-JS-001
+    message: User-controlled data reaches operating-system command execution.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe: CWE-78
+      confidence: HIGH
+      technology: [node]
+      fix: Use a fixed executable with an argument array and validate every external argument.
+    patterns:
+      - pattern-either:
+          - pattern: child_process.exec($X, ...)
+          - pattern: child_process.execSync($X, ...)
+          - pattern: $CP.exec($X, ...)
+      - pattern-inside: |
+          $CP = require("child_process")
+          ...
+
+  - id: TRISHUL-REACT-001
+    message: React renders raw HTML; confirm that the value is sanitized with a maintained allowlist.
+    severity: WARNING
+    languages: [javascript, typescript]
+    metadata:
+      cwe: CWE-79
+      confidence: MEDIUM
+      technology: [react]
+      fix: Render structured React elements or sanitize untrusted HTML before use.
+    pattern: '<$X dangerouslySetInnerHTML={{__html: $VALUE}} ... />'
+
+  - id: TRISHUL-MONGO-001
+    message: Request data is used directly as a MongoDB query.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe: CWE-943
+      confidence: HIGH
+      technology: [mongodb]
+      fix: Build an allowlisted query object and reject MongoDB operators from external input.
+    pattern-either:
+      - pattern: $COLLECTION.find($REQ.body, ...)
+      - pattern: $COLLECTION.findOne($REQ.body, ...)
+      - pattern: $MODEL.find($REQ.body, ...)
+      - pattern: $MODEL.findOne($REQ.body, ...)
+
+  - id: TRISHUL-MONGO-002
+    message: MongoDB credentials are embedded in a connection URI.
+    severity: ERROR
+    languages: [javascript, typescript, python]
+    metadata:
+      cwe: CWE-798
+      confidence: HIGH
+      technology: [mongodb]
+      fix: Load the URI from an approved secret store and rotate the exposed credential.
+    pattern-regex: 'mongodb(?:\+srv)?://[^:\s]+:[^@\s]+@'
+
+  - id: TRISHUL-NODE-001
+    message: Node TLS certificate verification is disabled.
+    severity: ERROR
+    languages: [javascript, typescript]
+    metadata:
+      cwe: CWE-295
+      confidence: HIGH
+      technology: [node]
+      fix: Restore certificate verification and configure an approved CA bundle.
+    pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"

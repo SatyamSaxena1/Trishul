@@ -75,6 +75,20 @@ services:
       context: .
       target: app
     networks: [edge, application, data]
+    environment:
+      <<: *app-environment
+      INTEGRATION_SECRET_KEY_FILE: /run/secrets/integration_secret_key
+      GIT_CREDENTIAL_PUBLIC_KEY_FILE: /run/secrets/git_credential_public_key
+    secrets:
+      - db_app_password
+      - redis_password
+      - s3_access_key
+      - s3_secret_key
+      - django_secret_key
+      - internal_ai_token
+      - metrics_token
+      - integration_secret_key
+      - git_credential_public_key
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health/live', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r, timeout=3)"]
       interval: 30s
@@ -126,6 +140,34 @@ services:
         target: /run/oci.sock
         read_only: false
     stop_grace_period: 35m
+
+  repository-fetcher:
+    <<: *app
+    image: ${TRISHUL_FETCHER_IMAGE:-ai-trishul-fetcher:0.1.0}
+    build:
+      context: .
+      target: fetcher
+    command: [celery, -A, trishul, worker, --loglevel=INFO, --queues=git-fetch, "--concurrency=${GIT_FETCH_CONCURRENCY:-2}"]
+    environment:
+      <<: *app-environment
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+      GITLAB_API_URL: ${GITLAB_API_URL:-https://gitlab.com/api/v4}
+      TRISHUL_PUBLIC_URL: https://${TRISHUL_HOSTNAME}
+      GITHUB_APP_PRIVATE_KEY_FILE: /run/secrets/github_app_private_key
+      GIT_CREDENTIAL_PRIVATE_KEY_FILE: /run/secrets/git_credential_private_key
+    secrets:
+      - db_app_password
+      - redis_password
+      - s3_access_key
+      - s3_secret_key
+      - django_secret_key
+      - internal_ai_token
+      - metrics_token
+      - github_app_private_key
+      - git_credential_private_key
+    networks: [application, data, git]
+    stop_grace_period: 15m
 
   migrate:
     <<: *app
@@ -190,6 +232,7 @@ networks:
   application: { internal: true }
   data: { internal: true }
   model: { internal: false }
+  git: { internal: false }
 
 volumes:
   postgres_data:
@@ -207,3 +250,7 @@ secrets:
   ai_endpoint_credential: { file: ./secrets/ai_endpoint_credential }
   tls_certificate: { file: ./secrets/tls.crt }
   tls_private_key: { file: ./secrets/tls.key }
+  integration_secret_key: { file: ./secrets/integration_secret_key }
+  git_credential_public_key: { file: ./secrets/git_credential_public_key.pem }
+  git_credential_private_key: { file: ./secrets/git_credential_private_key.pem }
+  github_app_private_key: { file: ./secrets/github_app_private_key.pem }

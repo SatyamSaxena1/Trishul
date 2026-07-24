@@ -13,8 +13,8 @@ RESULT_SCHEMA = {
     "type": "object",
     "required": ["pack", "pack_version", "coverage", "findings"],
     "properties": {
-        "pack": {"const": "python-stdlib"},
-        "pack_version": {"const": "1.0"},
+        "pack": {"enum": ["python-stdlib", "semgrep", "trivy"]},
+        "pack_version": {"type": "string"},
         "coverage": {"type": "object"},
         "findings": {
             "type": "array",
@@ -33,11 +33,25 @@ RESULT_SCHEMA = {
                     "status",
                     "remediation",
                     "fingerprint",
-                    "file_path",
-                    "start_line",
-                    "end_line",
-                    "snippet_hash",
+                    "evidence",
                 ],
+                "properties": {
+                    "status": {"enum": ["candidate", "needs_validation"]},
+                    "evidence": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "required": ["evidence_type", "location"],
+                            "properties": {
+                                "evidence_type": {
+                                    "enum": ["source", "dependency", "http", "configuration", "test"]
+                                },
+                                "location": {"type": "object"},
+                            },
+                        },
+                    },
+                },
             },
         },
     },
@@ -56,11 +70,11 @@ def _run(command, *, timeout=120, capture=False):
     )
 
 
-def analyze(*, repository_version, scan_id):
+def analyze(*, repository_version, scan_id, pack):
     if os.getenv("RUNNER_BACKEND", "oci") == "kubernetes":
         from .kubernetes_runner import analyze as kubernetes_analyze
 
-        return kubernetes_analyze(repository_version=repository_version, scan_id=scan_id)
+        return kubernetes_analyze(repository_version=repository_version, scan_id=scan_id, pack=pack)
     cli = os.getenv("OCI_CLI", "docker")
     if Path(cli).name not in {"docker", "podman", "docker.exe", "podman.exe"}:
         raise RuntimeError("OCI_CLI must be docker or podman")
@@ -113,6 +127,7 @@ def analyze(*, repository_version, scan_id):
                     image,
                     "/work/input.archive",
                     "/work/results.json",
+                    pack,
                 ]
             )
             _run([cli, "cp", str(archive_path), f"{container}:/work/input.archive"])

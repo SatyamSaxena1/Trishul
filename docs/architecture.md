@@ -9,6 +9,7 @@ The repository uses one backend ecosystem. Django/DRF, Celery workers, the sched
 - `worker` and `scheduler`: idempotent asynchronous workflows.
 - `ai-gateway`: the only service attached to the model-egress network or model credentials.
 - `analysis-controller`: consumes only the analysis queue and uses a dedicated rootless runtime socket under Compose or least-privilege Job/PVC APIs under Kubernetes.
+- `repository-fetcher`: consumes only the Git-fetch queue, exchanges short-lived provider credentials, and turns exact commits into validated immutable archives.
 - analyzer jobs: disposable containers with no network, no capabilities, bounded resources, and no application secrets.
 - PostgreSQL: authoritative domain, job, policy, and audit state.
 - Redis: transient Celery transport; lost messages are recovered from PostgreSQL job state.

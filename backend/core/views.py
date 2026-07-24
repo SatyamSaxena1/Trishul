@@ -4,8 +4,10 @@ import html
 import io
 import json
 import logging
+import re
 import uuid
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 import httpx
 import redis
@@ -22,6 +24,8 @@ from rest_framework.response import Response
 
 from .ai_gateway import GatewayPolicyError, invoke
 from .archive import UnsafeArchive, inspect_archive
+from .credentials import decrypt_secret
+from .integrations import validate_commit
 from .models import (
     AIAnalysisRun,
     Application,
@@ -53,8 +57,10 @@ from .models import (
     RiskScore,
     Scan,
     ServiceAccount,
+    StagingTarget,
     Threat,
     ThreatModel,
+    WebhookDelivery,
     Workspace,
 )
 from .risk import FORMULA_VERSION, calculate
@@ -62,6 +68,7 @@ from .security import ServicePrincipal, has_permission, principal_permissions, r
 from .serializers import SERIALIZERS
 from .storage import healthcheck as storage_healthcheck
 from .storage import put_file
+from .tenancy import tenant_context
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +119,7 @@ PERMISSION_PREFIX = {
     Report: "report",
     ServiceAccount: "service_account",
     AuditEvent: "audit",
+    StagingTarget: "repository",
 }
 
 APPLICATION_PATH = {
@@ -138,6 +146,7 @@ APPLICATION_PATH = {
     RiskAcceptance: "risk__application_id",
     Approval: "acceptance__risk__application_id",
     Report: "application_id",
+    StagingTarget: "application_id",
 }
 
 WRITE_PERMISSION = {
@@ -310,16 +319,237 @@ class RepositoryViewSet(viewset_for(Repository)):
             manifest = inspect_archive(uploaded)
         except UnsafeArchive as exc:
             raise exceptions.ValidationError({"archive": str(exc)}) from exc
-        key = f"{request.tenant.id}/repositories/{repository.id}/{manifest['sha256']}.archive"
+        commit_sha = request.data.get("commit_sha", "")
+        if commit_sha:
+            commit_sha = validate_commit(commit_sha)
+        key = f"{request.tenant.id}/repositories/{repository.id}/{commit_sha or manifest['sha256']}.archive"
         put_file(key, uploaded, content_type=uploaded.content_type or "application/octet-stream")
         version, _ = RepositoryVersion.all_objects.get_or_create(
             tenant=request.tenant,
             repository=repository,
             sha256=manifest["sha256"],
-            defaults={"object_key": key, "size": manifest["compressed_size"] or uploaded.size, "manifest": manifest},
+            commit_sha=commit_sha,
+            defaults={
+                "object_key": key,
+                "size": manifest["compressed_size"] or uploaded.size,
+                "manifest": manifest,
+                "ref": request.data.get("ref", "")[:300],
+                "source_event": {"source": "ci"} if commit_sha else {"source": "upload"},
+            },
         )
         self._audit("repository.imported", version)
         return Response(SERIALIZERS[RepositoryVersion](version).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def fetch(self, request, pk=None):
+        repository = self.get_object()
+        if repository.source_type == Repository.SourceType.UPLOAD:
+            raise exceptions.ValidationError({"source_type": "Upload repositories cannot be fetched."})
+        commit_sha = validate_commit(request.data.get("commit_sha", ""))
+        from .tasks import fetch_repository
+
+        fetch_repository.apply_async(
+            args=[
+                str(request.tenant.id),
+                str(repository.id),
+                commit_sha,
+                request.data.get("ref", "")[:300],
+                {"source": "api"},
+            ],
+            queue="git-fetch",
+        )
+        return Response({"state": "queued", "commit_sha": commit_sha}, status=status.HTTP_202_ACCEPTED)
+
+
+def _ci_signature(repository, body, supplied):
+    if not repository.ci_secret_ciphertext:
+        raise exceptions.PermissionDenied("CI result signing is not configured for this repository.")
+    expected = "sha256=" + hmac.new(
+        decrypt_secret(repository.ci_secret_ciphertext).encode(), body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(supplied, expected):
+        raise exceptions.PermissionDenied("Invalid CI result signature.")
+
+
+def _validated_external_finding(item):
+    required = {
+        "rule_id",
+        "rule_version",
+        "title",
+        "description",
+        "severity",
+        "confidence",
+        "fingerprint",
+        "evidence",
+    }
+    if (
+        not isinstance(item, dict)
+        or required - item.keys()
+        or not all(
+            isinstance(item.get(name), str) and item[name].strip()
+            for name in ("rule_id", "rule_version", "title", "description")
+        )
+        or not isinstance(item["evidence"], list)
+        or not item["evidence"]
+    ):
+        raise exceptions.ValidationError({"findings": "Every finding requires metadata and evidence."})
+    try:
+        valid_scores = 0 <= int(item["severity"]) <= 5 and 0 <= int(item["confidence"]) <= 5
+    except (TypeError, ValueError):
+        valid_scores = False
+    if not valid_scores:
+        raise exceptions.ValidationError({"findings": "Severity and confidence must be between 0 and 5."})
+    if not isinstance(item["fingerprint"], str) or not re.fullmatch(r"[0-9a-f]{64}", item["fingerprint"]):
+        raise exceptions.ValidationError({"findings": "Finding fingerprints must be lowercase SHA-256 values."})
+    for evidence in item["evidence"]:
+        if (
+            not isinstance(evidence, dict)
+            or evidence.get("evidence_type") not in FindingEvidence.Type.values
+            or not isinstance(evidence.get("location"), dict)
+        ):
+            raise exceptions.ValidationError({"findings": "Evidence type and structured location are required."})
+        for name in ("start_line", "end_line"):
+            if name in evidence["location"]:
+                try:
+                    if int(evidence["location"][name]) < 0:
+                        raise ValueError
+                except (TypeError, ValueError) as exc:
+                    raise exceptions.ValidationError({"findings": f"{name} must be a non-negative integer."}) from exc
+    return item
+
+
+class RepositoryVersionViewSet(viewset_for(RepositoryVersion, immutable=True)):
+    @action(detail=True, methods=["post"], url_path="external-results")
+    def external_results(self, request, pk=None):
+        version = self.get_object()
+        body = request.body
+        if len(body) > 10 * 1024 * 1024:
+            raise exceptions.ValidationError({"bundle": "Result bundle exceeds 10 MiB."})
+        _ci_signature(version.repository, body, request.headers.get("X-Trishul-Signature-256", ""))
+        bundle = request.data
+        if not isinstance(bundle, dict):
+            raise exceptions.ValidationError({"bundle": "Result bundle must be a JSON object."})
+        if bundle.get("schema") != "trishul-ci-results-v1":
+            raise exceptions.ValidationError({"schema": "Use trishul-ci-results-v1."})
+        if bundle.get("commit_sha") != version.commit_sha or not version.commit_sha:
+            raise exceptions.ValidationError({"commit_sha": "Result commit does not match the repository version."})
+        pack = bundle.get("pack")
+        if pack not in {"zap", "ci-tests"}:
+            raise exceptions.ValidationError({"pack": "External results support zap or ci-tests."})
+        coverage = bundle.get("coverage", {})
+        if not isinstance(coverage, dict):
+            raise exceptions.ValidationError({"coverage": "Coverage must be a JSON object."})
+        findings = bundle.get("findings", [])
+        if not isinstance(findings, list) or len(findings) > 10_000:
+            raise exceptions.ValidationError({"findings": "Findings must be an array of at most 10,000 items."})
+        findings = [_validated_external_finding(item) for item in findings]
+        if pack == "zap":
+            allowed = {
+                target.url.rstrip("/")
+                for target in StagingTarget.objects.filter(
+                    application=version.repository.application, approved=True
+                )
+            }
+            target = str(coverage.get("target", "")).rstrip("/")
+            try:
+                within_limits = (
+                    0 < int(coverage.get("requests_per_second", 0)) <= 5
+                    and 0 <= int(coverage.get("duration_seconds", 0)) <= 1800
+                )
+            except (TypeError, ValueError):
+                within_limits = False
+            if (
+                target not in allowed
+                or coverage.get("authenticated") is not False
+                or not within_limits
+            ):
+                raise exceptions.ValidationError({"target": "ZAP coverage violates the approved staging policy."})
+            for item in findings:
+                has_http_evidence = False
+                for evidence in item["evidence"]:
+                    if evidence["evidence_type"] != FindingEvidence.Type.HTTP:
+                        continue
+                    has_http_evidence = True
+                    url = evidence["location"].get("url", "")
+                    parsed = urlsplit(url)
+                    origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+                    if parsed.scheme != "https" or origin not in allowed:
+                        raise exceptions.ValidationError(
+                            {"target": "ZAP evidence must use an approved staging target."}
+                        )
+                if not has_http_evidence:
+                    raise exceptions.ValidationError({"findings": "Every ZAP finding requires HTTP evidence."})
+        result_key = f"{request.tenant.id}/scan-results/external/{uuid.uuid4()}.json"
+        put_file(result_key, io.BytesIO(body), content_type="application/json")
+        with transaction.atomic():
+            scan = Scan.all_objects.create(
+                tenant=request.tenant,
+                repository_version=version,
+                state=Scan.State.COMPLETED,
+                language_pack=pack,
+                language_pack_version=str(bundle.get("pack_version", "1.0"))[:40],
+                coverage=bundle.get("coverage", {}),
+                result_object_key=result_key,
+            )
+            for item in findings:
+                finding = Finding.all_objects.create(
+                    tenant=request.tenant,
+                    scan=scan,
+                    rule_id=str(item["rule_id"])[:160],
+                    rule_version=str(item["rule_version"])[:40],
+                    language=str(item.get("language") or pack)[:60],
+                    title=str(item["title"])[:300],
+                    description=str(item["description"])[:8000],
+                    cwe=str(item.get("cwe", ""))[:30],
+                    asvs=str(item.get("asvs", ""))[:60],
+                    severity=int(item["severity"]),
+                    confidence=int(item["confidence"]),
+                    status=Finding.Status.NEEDS_VALIDATION,
+                    remediation=str(item.get("remediation", ""))[:8000],
+                    fingerprint=str(item["fingerprint"])[:64],
+                )
+                for evidence in item["evidence"]:
+                    location = evidence["location"]
+                    FindingEvidence.all_objects.create(
+                        tenant=request.tenant,
+                        finding=finding,
+                        evidence_type=evidence["evidence_type"],
+                        location=location,
+                        file_path=str(location.get("file_path", ""))[:600],
+                        start_line=max(0, int(location.get("start_line", 0))),
+                        end_line=max(0, int(location.get("end_line", 0))),
+                        snippet_hash=str(location.get("snippet_hash", ""))[:64],
+                    )
+            self._audit("scan.external_results_imported", scan)
+        if version.repository.source_type != Repository.SourceType.UPLOAD:
+            from .tasks import publish_advisory_status
+
+            publish_advisory_status.apply_async(
+                args=[str(request.tenant.id), str(version.id)], queue="git-fetch"
+            )
+        return Response(SERIALIZERS[Scan](scan).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"])
+    def status(self, request, pk=None):
+        version = self.get_object()
+        scans = Scan.objects.filter(repository_version=version)
+        has_scans = scans.exists()
+        return Response(
+            {
+                "commit_sha": version.commit_sha,
+                "state": (
+                    "queued"
+                    if not has_scans
+                    else "failed"
+                    if scans.filter(state=Scan.State.FAILED).exists()
+                    else "running"
+                    if scans.exclude(state=Scan.State.COMPLETED).exists()
+                    else "completed"
+                ),
+                "scans": SERIALIZERS[Scan](scans.order_by("created_at"), many=True).data,
+                "findings": Finding.objects.filter(scan__repository_version=version).count(),
+            }
+        )
 
 
 class RiskViewSet(viewset_for(Risk)):
@@ -345,12 +575,12 @@ class RiskViewSet(viewset_for(Risk)):
 
 class ScanViewSet(viewset_for(Scan)):
     def perform_create(self, serializer):
-        if (
-            serializer.validated_data.get("language_pack") != "python-stdlib"
-            or serializer.validated_data.get("language_pack_version") != "1.0"
-        ):
+        pack = serializer.validated_data.get("language_pack")
+        if pack not in {"python-stdlib", "semgrep", "trivy"} or serializer.validated_data.get(
+            "language_pack_version"
+        ) != "1.0":
             raise exceptions.ValidationError(
-                {"language_pack": "Only the experimental python-stdlib 1.0 pack is installed."}
+                {"language_pack": "Installed packs are python-stdlib, semgrep, and trivy version 1.0."}
             )
         super().perform_create(serializer)
         scan = serializer.instance
@@ -532,7 +762,7 @@ MODEL_VIEWSETS = {
     "applications": viewset_for(Application),
     "memberships": viewset_for(Membership),
     "repositories": RepositoryViewSet,
-    "repository-versions": viewset_for(RepositoryVersion, immutable=True),
+    "repository-versions": RepositoryVersionViewSet,
     "jobs": viewset_for(Job),
     "scans": ScanViewSet,
     "findings": viewset_for(Finding),
@@ -560,7 +790,103 @@ MODEL_VIEWSETS = {
     "reports": ReportViewSet,
     "service-accounts": ServiceAccountViewSet,
     "audit-events": AuditEventViewSet,
+    "staging-targets": viewset_for(StagingTarget),
 }
+
+
+def _webhook_commit(provider, payload, event):
+    if provider == Repository.SourceType.GITHUB:
+        if event == "push":
+            return payload.get("after", ""), payload.get("ref", "")
+        if event == "pull_request" and payload.get("action") in {"opened", "reopened", "synchronize"}:
+            head = payload.get("pull_request", {}).get("head", {})
+            return head.get("sha", ""), head.get("ref", "")
+    if provider == Repository.SourceType.GITLAB:
+        if event == "Push Hook":
+            return payload.get("checkout_sha") or payload.get("after", ""), payload.get("ref", "")
+        attributes = payload.get("object_attributes", {})
+        if event == "Merge Request Hook" and attributes.get("action") in {"open", "reopen", "update"}:
+            return (
+                payload.get("object_attributes", {}).get("last_commit", {}).get("id")
+                or payload.get("object_attributes", {}).get("sha", ""),
+                attributes.get("source_branch", ""),
+            )
+    return "", ""
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def repository_webhook(request, provider, tenant_id, repository_id):
+    if provider not in {Repository.SourceType.GITHUB, Repository.SourceType.GITLAB}:
+        return Response(status=404)
+    body = request.body
+    if len(body) > 1024 * 1024:
+        return Response({"detail": "Webhook payload exceeds 1 MiB."}, status=413)
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return Response({"detail": "Webhook payload must be JSON."}, status=400)
+    with transaction.atomic(), tenant_context(tenant_id):
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('trishul.tenant_id', %s, true)", [str(tenant_id)])
+        try:
+            repository = Repository.objects.get(pk=repository_id, source_type=provider)
+        except Repository.DoesNotExist:
+            return Response(status=404)
+        secret = decrypt_secret(repository.webhook_secret_ciphertext)
+        if provider == Repository.SourceType.GITHUB:
+            supplied = request.headers.get("X-Hub-Signature-256", "")
+            expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+            event = request.headers.get("X-GitHub-Event", "")
+            delivery_id = request.headers.get("X-GitHub-Delivery", "")
+            external_id = str(payload.get("repository", {}).get("id", ""))
+            valid = hmac.compare_digest(supplied, expected)
+        else:
+            event = request.headers.get("X-Gitlab-Event", "")
+            delivery_id = request.headers.get("X-Gitlab-Event-UUID", "")
+            external_id = str(payload.get("project", {}).get("id", ""))
+            valid = hmac.compare_digest(request.headers.get("X-Gitlab-Token", ""), secret)
+        if not valid or not delivery_id or external_id != repository.external_id:
+            return Response(status=403)
+        commit_sha, ref = _webhook_commit(provider, payload, event)
+        if not commit_sha:
+            return Response({"state": "ignored"}, status=status.HTTP_202_ACCEPTED)
+        try:
+            commit_sha = validate_commit(commit_sha)
+        except exceptions.ValidationError:
+            return Response({"detail": "Webhook commit is invalid."}, status=400)
+        delivery, created = WebhookDelivery.all_objects.get_or_create(
+            tenant=repository.tenant,
+            repository=repository,
+            provider=provider,
+            delivery_id=delivery_id[:200],
+            defaults={
+                "commit_sha": commit_sha,
+                "ref": ref[:300],
+                "event": event[:80],
+            },
+        )
+        if created:
+            from .tasks import fetch_repository
+
+            transaction.on_commit(
+                lambda: fetch_repository.apply_async(
+                    args=[
+                        str(tenant_id),
+                        str(repository.id),
+                        commit_sha,
+                        ref[:300],
+                        {"provider": provider, "event": event, "delivery_id": str(delivery.id)},
+                    ],
+                    queue="git-fetch",
+                )
+            )
+    return Response(
+        {"state": "queued" if created else "duplicate", "commit_sha": commit_sha},
+        status=status.HTTP_202_ACCEPTED,
+    )
 
 
 @api_view(["GET"])
