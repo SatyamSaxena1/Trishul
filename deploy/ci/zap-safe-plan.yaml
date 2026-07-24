@@ -1,0 +1,51 @@
+env:
+  contexts:
+    - name: staging
+      urls:
+        - __TARGET__
+
+jobs:
+  - type: spider
+    parameters:
+      context: staging
+      maxDuration: 5
+      maxDepth: 5
+      maxChildren: 20
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 5
+  - type: activeScan
+    parameters:
+      context: staging
+      maxRuleDurationInMins: 2
+      maxScanDurationInMins: 20
+      delayInMs: 200
+      threadPerHost: 1
+      maxAlertsPerRule: 20
+    policyDefinition:
+      defaultStrength: Low
+      defaultThreshold: Off
+      rules:
+        - id: 0
+          name: Directory Browsing
+          threshold: Medium
+        - id: 10205
+          name: HTTPS Configuration
+          threshold: Medium
+        - id: 40028
+          name: ELMAH Information Leak
+          threshold: Medium
+        - id: 40032
+          name: .htaccess Information Leak
+          threshold: Medium
+        - id: 40034
+          name: .env Information Leak
+          threshold: Medium
+        - id: 40035
+          name: Hidden File Finder
+          threshold: Medium
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: /zap/wrk
+      reportFile: zap.json

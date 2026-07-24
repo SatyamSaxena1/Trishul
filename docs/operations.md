@@ -7,7 +7,24 @@
 - Customer-managed DNS, TLS certificate, OIDC application, S3-compatible storage, and private model endpoints.
 - PostgreSQL and Redis supplied by the Compose profile.
 
-Production should reserve at least 4 CPU cores, 12 GiB RAM, and 50 GiB local disk plus object-storage capacity. Analyzer concurrency and resource ceilings must be calibrated to the customer host.
+Production with the multi-stack analyzer should reserve at least 8 CPU cores, 24 GiB RAM, and 150 GiB local disk plus object-storage capacity. Start with one analyzer and two Git fetches at a time; analyzer concurrency and resource ceilings must be calibrated to the customer host.
+
+GitHub and GitLab webhooks enter through repository-specific URLs returned by the repository API. The repository fetcher is the only application service with Git-provider egress and private Git credential decryption. Semgrep and Trivy run in the existing networkless analyzer boundary; project builds, tests, package installation, and OWASP ZAP remain CI responsibilities.
+
+Register Git repositories through `POST /api/v1/repositories/` with `source_type`, HTTPS `clone_url`,
+provider `external_id`, `webhook_secret`, and `ci_secret`. GitHub also requires `installation_id`; GitLab
+requires an expiring project token in `credential`. Configure provider webhooks at
+`/api/v1/webhooks/{github|gitlab}/{tenant_id}/{repository_id}`. The GitHub App needs repository contents
+read and commit statuses write permissions. Keep the GitLab clone token limited to `read_repository`;
+optionally supply a separate, expiring Reporter token as `status_credential` when direct-fetch scans must
+publish advisory GitLab commit statuses. GitLab CI uploads already report their own advisory job status.
+
+CI service accounts need `repository.read`, `repository.import`, `scan.read`, and `scan.create`, scoped to
+their application. Copy the applicable template under `deploy/ci/`; CI uploads the commit archive, queues
+Semgrep and Trivy, and may submit signed `ci-tests` and `zap` bundles. Register and approve each exact
+staging origin through `/api/v1/staging-targets/` before accepting ZAP evidence. The included ZAP
+automation policy is unauthenticated, capped at 30 minutes and five active requests per second, and enables
+only read-only discovery/TLS rules.
 
 ## Installation
 

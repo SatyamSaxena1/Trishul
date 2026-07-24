@@ -1,6 +1,8 @@
 from rest_framework import serializers
 
 from .ai_gateway import validate_endpoint
+from .credentials import encrypt_credential, encrypt_secret
+from .integrations import validate_clone_url, validate_staging_url
 from .models import (
     AIAnalysisRun,
     Application,
@@ -32,6 +34,7 @@ from .models import (
     RiskScore,
     Scan,
     ServiceAccount,
+    StagingTarget,
     TenantScopedModel,
     Threat,
     ThreatModel,
@@ -78,12 +81,84 @@ OrganizationSerializer = serializer_for(Organization)
 WorkspaceSerializer = serializer_for(Workspace)
 ApplicationSerializer = serializer_for(Application)
 MembershipSerializer = serializer_for(Membership)
-RepositorySerializer = serializer_for(Repository)
+
+
+class RepositorySerializer(TenantModelSerializer):
+    credential = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    status_credential = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    webhook_secret = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    ci_secret = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    class Meta:
+        model = Repository
+        fields = tuple(
+            field.name for field in Repository._meta.fields if not field.name.endswith("_ciphertext")
+        ) + ("credential", "status_credential", "webhook_secret", "ci_secret")
+        read_only_fields = (
+            "tenant",
+            "version",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        source_type = attrs.get("source_type", getattr(self.instance, "source_type", "upload"))
+        clone_url = attrs.get("clone_url", getattr(self.instance, "clone_url", ""))
+        if source_type != Repository.SourceType.UPLOAD:
+            if not clone_url or not attrs.get("external_id", getattr(self.instance, "external_id", "")):
+                raise serializers.ValidationError("Git repositories require clone_url and external_id.")
+            validate_clone_url(source_type, clone_url)
+            if not attrs.get("webhook_secret") and not getattr(self.instance, "webhook_secret_ciphertext", ""):
+                raise serializers.ValidationError({"webhook_secret": "A webhook secret is required."})
+            if source_type == Repository.SourceType.GITHUB and not attrs.get(
+                "installation_id", getattr(self.instance, "installation_id", "")
+            ):
+                raise serializers.ValidationError({"installation_id": "A GitHub installation ID is required."})
+            if source_type == Repository.SourceType.GITLAB and not attrs.get("credential") and not getattr(
+                self.instance, "credential_ciphertext", ""
+            ):
+                raise serializers.ValidationError({"credential": "A GitLab read-only token is required."})
+        return attrs
+
+    def _secrets(self, validated_data):
+        for name, target in (
+            ("credential", "credential_ciphertext"),
+            ("status_credential", "status_credential_ciphertext"),
+            ("webhook_secret", "webhook_secret_ciphertext"),
+            ("ci_secret", "ci_secret_ciphertext"),
+        ):
+            if name in validated_data:
+                value = validated_data.pop(name)
+                validated_data[target] = (
+                    encrypt_credential(value) if name in {"credential", "status_credential"} else encrypt_secret(value)
+                )
+        return validated_data
+
+    def create(self, validated_data):
+        return super().create(self._secrets(validated_data))
+
+    def update(self, instance, validated_data):
+        return super().update(instance, self._secrets(validated_data))
+
+
 RepositoryVersionSerializer = serializer_for(RepositoryVersion, read_only_fields=("immutable",))
 JobSerializer = serializer_for(Job)
 ScanSerializer = serializer_for(Scan, read_only_fields=("state", "coverage"))
 FindingSerializer = serializer_for(Finding)
 FindingEvidenceSerializer = serializer_for(FindingEvidence)
+
+
+class StagingTargetSerializer(TenantModelSerializer):
+    class Meta:
+        model = StagingTarget
+        fields = "__all__"
+        read_only_fields = ("tenant", "version", "created_at", "updated_at")
+
+    def validate_url(self, value):
+        return validate_staging_url(value)
+
+
 ThreatModelSerializer = serializer_for(ThreatModel)
 ArchitectureComponentSerializer = serializer_for(ArchitectureComponent)
 DataFlowSerializer = serializer_for(DataFlow)
@@ -190,5 +265,6 @@ SERIALIZERS = {
     AIAnalysisRun: AIAnalysisRunSerializer,
     Report: ReportSerializer,
     ServiceAccount: ServiceAccountSerializer,
+    StagingTarget: StagingTargetSerializer,
     AuditEvent: serializer_for(AuditEvent, read_only_fields=tuple(field.name for field in AuditEvent._meta.fields)),
 }

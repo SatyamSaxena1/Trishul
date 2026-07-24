@@ -148,7 +148,7 @@ def _job(name, role, image, command, pvc, *, cpu="500m", memory="512Mi", deadlin
     return body
 
 
-def analyze(*, repository_version, scan_id):
+def analyze(*, repository_version, scan_id, pack):
     api = KubernetesAPI()
     suffix = str(scan_id).replace("-", "")[:20]
     pvc = f"scan-{suffix}"
@@ -196,7 +196,7 @@ def analyze(*, repository_version, scan_id):
                 analyzer,
                 "analyzer",
                 analyzer_image,
-                ["python", "/app/main.py", "/work/input.archive", "/work/results.json"],
+                ["python", "/app/main.py", "/work/input.archive", "/work/results.json", pack],
                 pvc,
                 cpu="2",
                 memory="4Gi",

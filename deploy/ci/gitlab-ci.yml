@@ -1,0 +1,32 @@
+trishul-advisory:
+  stage: test
+  image: alpine:3.22
+  allow_failure: true
+  before_script:
+    - apk add --no-cache curl git python3
+  script:
+    # Run the project's existing build and tests before these advisory uploads.
+    - git archive --format=tar --output=source.tar "$CI_COMMIT_SHA"
+    - >
+      curl --fail --silent --show-error
+      -H "Authorization: Bearer $TRISHUL_TOKEN"
+      -F "archive=@source.tar" -F "commit_sha=$CI_COMMIT_SHA" -F "ref=$CI_COMMIT_REF_NAME"
+      "$TRISHUL_URL/api/v1/repositories/$TRISHUL_REPOSITORY_ID/imports/"
+      > version.json
+    - VERSION_ID="$(python3 -c "import json; print(json.load(open('version.json'))['id'])")"
+    - >
+      for PACK in semgrep trivy; do
+        curl --fail --silent --show-error
+        -H "Authorization: Bearer $TRISHUL_TOKEN" -H "Content-Type: application/json"
+        -d "{\"repository_version\":\"$VERSION_ID\",\"language_pack\":\"$PACK\",\"language_pack_version\":\"1.0\"}"
+        "$TRISHUL_URL/api/v1/scans/" >/dev/null;
+      done
+    - >
+      if [ -n "${TRISHUL_STAGING_URL:-}" ]; then
+        sh deploy/ci/run-zap.sh "$TRISHUL_STAGING_URL" "$CI_COMMIT_SHA" "$VERSION_ID";
+      fi
+    # Convert JUnit with scripts/trishul_ci_bundle.py and upload it with
+    # scripts/trishul_ci_upload.py when the project exposes its report location.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

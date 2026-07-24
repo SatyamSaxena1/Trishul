@@ -19,3 +19,10 @@ FROM docker:28-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c
 
 FROM app AS controller
 COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker
+
+FROM app AS fetcher
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+USER 10001:10001

@@ -9,8 +9,10 @@ AI Trishul is a customer-hosted security intelligence MVP connecting evidence-ba
 - OIDC JWT validation with MFA claim enforcement and hashed, expiring service tokens.
 - Immutable evidence/version models and a hash-chained, database-protected audit ledger.
 - Safe ZIP/TAR inventory with traversal, link, file-count, file-size, and expansion limits.
+- Signed GitHub/GitLab webhooks, exact-commit fetching, encrypted provider credentials, and replay protection.
 - Disposable rootless OCI analyzer jobs with no network, read-only root, quotas, and signed image pinning in production.
-- Experimental Python language pack using deterministic AST rules; model output cannot confirm findings.
+- Experimental Python AST rules plus offline Semgrep source and Trivy dependency/secret/configuration packs.
+- Signed CI test and staging-only OWASP ZAP result ingestion; external tools cannot confirm findings.
 - Structured STRIDE threat generation requiring human-verified components and flows.
 - Evidence-required assessment conclusions and independent risk-acceptance approval.
 - Deterministic, versioned risk scoring with retained inputs.
@@ -19,7 +21,7 @@ AI Trishul is a customer-hosted security intelligence MVP connecting evidence-ba
 - Docker Compose deployment, encrypted backup/restore, offline release bundling, health checks, metrics, and upgrade tooling.
 - Kubernetes/OpenShift enterprise profile with Kustomize, restricted pod security, network policy, autoscaling, disruption budgets, external secrets, and Kubernetes-native isolated analysis jobs.
 
-The Python language pack is intentionally marked `experimental` until representative first-customer repositories establish its precision, recall, framework coverage, and maintenance acceptance.
+The scanner packs are intentionally marked `experimental` until representative customer repositories establish their precision, recall, framework coverage, and maintenance acceptance. Trishul never installs dependencies or executes repository code; builds, project tests, and staging DAST remain in customer CI.
 
 ## Development
 

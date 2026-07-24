@@ -19,7 +19,7 @@ doctor() {
         /var/run/docker.sock|/run/docker.sock) die "rootful Docker sockets are unsupported" ;;
     esac
     [ -S "$ROOTLESS_OCI_SOCKET" ] || die "rootless OCI socket does not exist: $ROOTLESS_OCI_SOCKET"
-    for file in db_owner_password db_app_password redis_password s3_access_key s3_secret_key django_secret_key internal_ai_token metrics_token ai_endpoint_credential backup_key tls.crt tls.key; do
+    for file in db_owner_password db_app_password redis_password s3_access_key s3_secret_key django_secret_key internal_ai_token metrics_token ai_endpoint_credential backup_key integration_secret_key git_credential_public_key.pem git_credential_private_key.pem github_app_private_key.pem tls.crt tls.key; do
         path="$ROOT/secrets/$file"
         [ -s "$path" ] || die "missing secret: secrets/$file"
         mode="$(stat -c '%a' "$path")"
@@ -63,8 +63,8 @@ backup() {
     mkdir -m 700 "$destination"
     plain="$destination/database.dump"
     resume=true
-    trap '$resume && $COMPOSE start api worker scheduler ai-gateway analysis-controller edge >/dev/null 2>&1 || true' EXIT INT TERM
-    $COMPOSE stop edge worker scheduler ai-gateway analysis-controller api
+    trap '$resume && $COMPOSE start api worker scheduler ai-gateway analysis-controller repository-fetcher edge >/dev/null 2>&1 || true' EXIT INT TERM
+    $COMPOSE stop edge worker scheduler ai-gateway analysis-controller repository-fetcher api
     $COMPOSE exec -T postgres pg_dump --username=trishul_owner --dbname=trishul --format=custom > "$plain"
     $COMPOSE run --rm -T --no-deps \
         -v "$destination:/backup" -v "$ROOT/secrets/backup_key:/run/secrets/backup_key:ro" \
@@ -73,7 +73,7 @@ backup() {
     rm -f "$plain"
     (cd "$destination" && sha256sum database.dump.enc manifest.json > SHA256SUMS)
     chmod -R go-rwx "$destination"
-    $COMPOSE start api worker scheduler ai-gateway analysis-controller edge
+    $COMPOSE start api worker scheduler ai-gateway analysis-controller repository-fetcher edge
     resume=false
     trap - EXIT INT TERM
     info "Encrypted backup created: $destination"
@@ -85,7 +85,7 @@ restore() {
     (cd "$source_dir" && sha256sum -c SHA256SUMS)
     plain="$source_dir/database.restore.dump"
     trap 'rm -f "$plain"' EXIT INT TERM
-    $COMPOSE stop edge api worker scheduler ai-gateway analysis-controller
+    $COMPOSE stop edge api worker scheduler ai-gateway analysis-controller repository-fetcher
     $COMPOSE run --rm -T --no-deps \
         -v "$source_dir:/backup" -v "$ROOT/secrets/backup_key:/run/secrets/backup_key:ro" \
         migrate python -m core.backup decrypt /backup/database.dump.enc /backup/database.restore.dump
@@ -112,7 +112,7 @@ bundle() {
     set -a; . "$ROOT/.env"; set +a
     destination="${2:-$ROOT/release/ai-trishul-offline}"
     mkdir -p "$destination/images"
-    images="${TRISHUL_IMAGE} ${TRISHUL_EDGE_IMAGE} ${TRISHUL_CONTROLLER_IMAGE} ${TRISHUL_ANALYZER_IMAGE} postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94 redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd"
+    images="${TRISHUL_IMAGE} ${TRISHUL_EDGE_IMAGE} ${TRISHUL_CONTROLLER_IMAGE} ${TRISHUL_FETCHER_IMAGE} ${TRISHUL_ANALYZER_IMAGE} postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94 redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd"
     docker save $images -o "$destination/images/images.tar"
     cp "$ROOT/compose.yaml" "$ROOT/.env.example" "$destination/"
     cp -R "$ROOT/bin" "$ROOT/deploy" "$ROOT/docs" "$destination/"
