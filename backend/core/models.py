@@ -288,6 +288,8 @@ class Finding(TenantScopedModel):
     status = models.CharField(max_length=30, choices=Status.choices, default=Status.CANDIDATE)
     validation_notes = models.TextField(blank=True, max_length=8000)
     remediation = models.TextField(blank=True, max_length=8000)
+    # Model-generated text is supplemental and must never drive status or risk.
+    ai_advisory = models.JSONField(default=dict, blank=True)
     fingerprint = models.CharField(max_length=64)
 
     class Meta:

@@ -50,7 +50,7 @@ def validate_endpoint(url: str) -> None:
 
 def _credential_headers(reference: str) -> dict:
     if not reference:
-        return {}
+        raise GatewayPolicyError("Credential reference is unavailable.")
     base = Path("/run/secrets").resolve()
     target = (base / reference).resolve()
     if base not in target.parents or not target.is_file():

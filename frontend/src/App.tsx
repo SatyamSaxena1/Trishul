@@ -11,7 +11,7 @@ type Context = {
   permissions: string[];
 };
 type Application = RecordBase & { name: string; description: string; criticality: number; internet_exposed: boolean };
-type Finding = RecordBase & { title: string; severity: number; confidence: number; status: string; cwe: string };
+type Finding = RecordBase & { title: string; severity: number; confidence: number; status: string; cwe: string; ai_advisory?: { label: string; summary: string; suggested_remediation: string } };
 type Threat = RecordBase & { stride_category: string; scenario: string; likelihood: number; impact: number; status: string };
 type Assessment = RecordBase & { name: string; status: string };
 type Risk = RecordBase & { title: string; state: string };
@@ -20,6 +20,10 @@ const EMPTY_PAGE = { results: [], next: null, previous: null };
 
 export function severityLabel(value: number): string {
   return ["Info", "Low", "Moderate", "High", "Critical", "Critical"][value] ?? "Unknown";
+}
+
+export function advisorySummary(advisory?: Finding["ai_advisory"]): string | null {
+  return advisory?.summary ? `${advisory.label}: ${advisory.summary}` : null;
 }
 
 function Login({ error }: { error?: string }) {
@@ -138,7 +142,7 @@ function Dashboard({ user }: { user: User }) {
         </section>
         <section className="panel" id="applications"><div className="section-title"><div><p className="eyebrow">PORTFOLIO</p><h2>Applications</h2></div><AppWizard api={api} onCreated={() => setRefresh((value) => value + 1)} /></div><table><thead><tr><th>Name</th><th>Criticality</th><th>Exposure</th></tr></thead><tbody>{applications.results.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.description}</small></td><td>{severityLabel(item.criticality)}</td><td>{item.internet_exposed ? "Internet" : "Internal"}</td></tr>)}</tbody></table>{!applications.results.length && <p className="empty">No applications registered.</p>}</section>
         <div className="two-column">
-          <section className="panel" id="findings"><p className="eyebrow">CODE REVIEW</p><h2>Findings</h2>{findings.results.map((item) => <article className="item" key={item.id}><div><strong>{item.title}</strong><small>{item.cwe || "Unmapped"} · {item.status.replaceAll("_", " ")}</small></div><span className={`severity severity-${item.severity}`}>{severityLabel(item.severity)}</span></article>)}{!findings.results.length && <p className="empty">No evidence-backed findings.</p>}</section>
+          <section className="panel" id="findings"><p className="eyebrow">CODE REVIEW</p><h2>Findings</h2>{findings.results.map((item) => <article className="item" key={item.id}><div><strong>{item.title}</strong><small>{item.cwe || "Unmapped"} · {item.status.replaceAll("_", " ")}</small>{advisorySummary(item.ai_advisory) && <small>{advisorySummary(item.ai_advisory)}</small>}</div><span className={`severity severity-${item.severity}`}>{severityLabel(item.severity)}</span></article>)}{!findings.results.length && <p className="empty">No evidence-backed findings. AI enrichment is optional and may be disabled.</p>}</section>
           <section className="panel" id="threats"><p className="eyebrow">ARCHITECTURE</p><h2>Threats</h2>{threats.results.map((item) => <article className="item" key={item.id}><div><strong>{item.stride_category}</strong><small>{item.scenario}</small></div><span>{item.status}</span></article>)}{!threats.results.length && <p className="empty">No reviewed threats.</p>}</section>
           <section className="panel" id="assessments"><p className="eyebrow">ASSURANCE</p><h2>Assessments</h2>{assessments.results.map((item) => <article className="item" key={item.id}><strong>{item.name}</strong><span>{item.status}</span></article>)}{!assessments.results.length && <p className="empty">No assessments started.</p>}</section>
           <section className="panel" id="risks"><p className="eyebrow">PRIORITY</p><h2>Risk intelligence</h2>{risks.results.map((item) => <article className="item" key={item.id}><strong>{item.title}</strong><span>{item.state}</span></article>)}{!risks.results.length && <p className="empty">No correlated risks.</p>}</section>
@@ -155,4 +159,3 @@ export default function App() {
   if (user === undefined) return <main className="loading">Loading secure workspace…</main>;
   return user ? <Dashboard user={user} /> : <Login error={error} />;
 }
-

@@ -14,6 +14,7 @@ from django.db import connection, transaction
 from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
+from jsonschema import ValidationError as JSONSchemaError
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from rest_framework import exceptions, status, viewsets
 from rest_framework.decorators import action, api_view, authentication_classes, permission_classes
@@ -22,6 +23,7 @@ from rest_framework.response import Response
 
 from .ai_gateway import GatewayPolicyError, invoke
 from .archive import UnsafeArchive, inspect_archive
+from .metrics import OPTIONAL_AI_FAILURES
 from .models import (
     AIAnalysisRun,
     Application,
@@ -757,6 +759,10 @@ def ai_invoke(request):
             },
         )
         return Response({"output": output, "metadata": metadata})
+    except (JSONSchemaError, json.JSONDecodeError) as exc:
+        OPTIONAL_AI_FAILURES.labels(reason=type(exc).__name__[:80]).inc()
+        logger.exception("Optional AI endpoint returned invalid structured output")
+        return Response({"error": "invalid_ai_output", "detail": "Optional AI output was rejected."}, status=502)
     except (
         KeyError,
         ModelConfiguration.DoesNotExist,
@@ -764,4 +770,9 @@ def ai_invoke(request):
         GatewayPolicyError,
         ValueError,
     ) as exc:
+        OPTIONAL_AI_FAILURES.labels(reason=type(exc).__name__[:80]).inc()
         return Response({"error": type(exc).__name__, "detail": str(exc)}, status=400)
+    except httpx.HTTPError as exc:
+        OPTIONAL_AI_FAILURES.labels(reason=type(exc).__name__[:80]).inc()
+        logger.exception("Optional AI endpoint failed")
+        return Response({"error": "ai_unavailable", "detail": "Optional AI enrichment is unavailable."}, status=502)

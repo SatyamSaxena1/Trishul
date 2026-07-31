@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { severityLabel } from "./App";
+import { advisorySummary, severityLabel } from "./App";
 
 describe("severityLabel", () => {
   it("keeps deterministic risk labels", () => {
@@ -9,3 +9,16 @@ describe("severityLabel", () => {
   });
 });
 
+describe("advisorySummary", () => {
+  it("keeps findings usable when AI is disabled", () => {
+    expect(advisorySummary(undefined)).toBeNull();
+  });
+
+  it("labels model-generated content as advisory", () => {
+    expect(advisorySummary({
+      label: "AI-generated advisory",
+      summary: "Review this path.",
+      suggested_remediation: "Consider a guard.",
+    })).toBe("AI-generated advisory: Review this path.");
+  });
+});
