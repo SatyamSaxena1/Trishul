@@ -75,8 +75,14 @@ services:
       context: .
       target: app
     networks: [edge, application, data]
+    environment:
+      <<: *app-environment
+      BACKUP_DIR: /var/lib/trishul/backups
+      HOST_CAPACITY_PATH: /var/lib/trishul/backups
+    volumes:
+      - ./backups:/var/lib/trishul/backups:ro
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health/live', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r, timeout=3)"]
+      test: [CMD, python, -c, "import urllib.request; r=urllib.request.Request('http://127.0.0.1:8000/api/v1/health/ready', headers={'X-Forwarded-Proto':'https'}); urllib.request.urlopen(r, timeout=3)"]
       interval: 30s
       timeout: 5s
       retries: 3

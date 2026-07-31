@@ -44,6 +44,52 @@ Restore verifies checksums and authenticated encryption, restores PostgreSQL, ap
 - `/api/v1/metrics`: protected by `X-Metrics-Token` and not exposed through the edge proxy.
 - Container logs are structured and must be shipped without source, evidence, prompts, responses, or secrets.
 
-Alert on repeated authorization failures, RLS denials, audit-chain failures, export spikes, unavailable object storage, queue depth, stale job leases, analyzer failures, AI budget/policy rejection, disk pressure, and backup failure.
+The metrics endpoint exposes deployment-wide, low-cardinality series only. Job series include submitted and terminal
+counts (`outcome` is limited to `completed`, `failed`, or `cancelled`), execution-duration and queue-wait histograms,
+active/stale gauges, retry/recovery totals, and broker depth for only `default` and `analysis`. It also exposes analyzer
+failures split into `failure` and `timeout`, AI gateway failures as a separate series, host-available bytes, latest
+backup age and checksum-verification result, and object-store readiness. A queue depth of `-1` means the broker could
+not be queried. No metric label or value contains a tenant/workspace/application name, repository or evidence path,
+evidence, prompt/response content, model endpoint, object key, error message, credential, or secret. Do not add such
+labels when extending metrics; labels must come from a reviewed fixed enumeration.
+
+### Pilot alert thresholds
+
+These defaults assume at most five concurrent pilot-sized scans and an 1,800-second analyzer deadline. Alert only
+after the stated duration to avoid paging on scrape or scheduling jitter.
+
+| Condition | Warning | Critical |
+| --- | --- | --- |
+| Analysis queue depth | `>5` for 10 min | `>10` for 10 min |
+| Queue wait | p95 `>5 min` for 15 min | p95 `>15 min` for 15 min |
+| Job duration | p95 `>20 min` for 15 min | p95 `>30 min` or any timeout for 5 min |
+| Active jobs | `>5` for 5 min | `>5` for 15 min (concurrency/lease fault) |
+| Stale jobs | `>=1` for 2 min | `>=3` for 5 min |
+| Retries/recoveries | increase `>=2` in 15 min | increase `>=5` in 15 min |
+| Analyzer failures | increase `>=2` in 30 min | increase `>=5` in 30 min or 3 consecutive scans |
+| AI failures | increase `>=3` in 15 min | increase `>=10` in 15 min; deterministic scans remain usable |
+| Available host disk | `<15 GiB` for 10 min | `<10 GiB` for 5 min (new scans/backups must stop) |
+| Backup age | `>25 h` | `>48 h` |
+| Backup verification | latest result `0` | result `0` for 1 h or no verified backup |
+| Object store | readiness `0` for 2 min | readiness `0` for 10 min |
+| API readiness | failing for 2 min | failing for 10 min |
+
+### Alert response
+
+1. **Queue, wait, active, or stale:** check `docker compose ps` and the scheduler/controller logs; confirm the
+   `analysis` worker is consuming, then inspect CPU, memory, rootless-runtime health, and expired leases. Do not raise
+   concurrency above five until capacity is confirmed. Reconciliation automatically requeues fewer than three
+   attempts; repeated recovery requires operator investigation rather than manual duplicate submission.
+2. **Analyzer failure or timeout:** correlate by timestamp and opaque job ID in restricted logs, check analyzer image
+   health and resource ceilings, and retry only after the cause is corrected. Never paste source/evidence into tickets.
+3. **AI failure:** check the private endpoint, TLS, rate/budget policy, and gateway logs. Keep this separate from
+   deterministic analyzer incidents; deterministic results can continue while AI workflows are disabled.
+4. **Disk:** pause new scans, identify container/runtime or backup growth with host tools, retain required backups,
+   and expand or safely reclaim capacity. Never delete the only verified recovery set.
+5. **Backup:** run `sh bin/trishulctl backup`, confirm `verification.status` is `success`, verify the coordinated
+   customer object-store checkpoint, and escalate immediately if verification fails. Perform a clean restore drill
+   at least quarterly.
+6. **Object store/readiness:** check endpoint DNS/TLS, credentials, bucket policy/capacity, PostgreSQL, and Redis as
+   indicated by `/health/ready`; restore service before resuming writes. Do not print credentials during diagnosis.
 
 The later Kubernetes/OpenShift profile, including installation and recovery contracts, is documented in [enterprise deployment](enterprise-deployment.md). Compose remains the supported MVP profile.
