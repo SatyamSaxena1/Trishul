@@ -11,10 +11,11 @@ from .storage import download_file
 
 RESULT_SCHEMA = {
     "type": "object",
-    "required": ["pack", "pack_version", "coverage", "findings"],
+    "required": ["pack", "pack_version", "rule_configuration_version", "coverage", "findings"],
     "properties": {
         "pack": {"const": "python-stdlib"},
         "pack_version": {"const": "1.0"},
+        "rule_configuration_version": {"type": "string", "minLength": 1},
         "coverage": {"type": "object"},
         "findings": {
             "type": "array",

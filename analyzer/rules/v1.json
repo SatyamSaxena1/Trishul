@@ -1,0 +1,40 @@
+{
+  "configuration_version": "1.0",
+  "pack": "python-stdlib",
+  "pack_version": "1.0",
+  "rules": {
+    "PY001": {
+      "enabled": true,
+      "rule_version": "1.0",
+      "title": "Shell command execution enabled",
+      "description": "A subprocess call enables shell parsing. Confirm whether untrusted data can reach the command.",
+      "cwe": "CWE-78",
+      "asvs": "V5",
+      "severity": 5,
+      "confidence": 4,
+      "remediation": "Pass an argument list with shell=False and validate every externally controlled argument."
+    },
+    "PY002": {
+      "enabled": true,
+      "rule_version": "1.0",
+      "title": "TLS certificate verification disabled",
+      "description": "An outbound request explicitly disables certificate verification.",
+      "cwe": "CWE-295",
+      "asvs": "V9",
+      "severity": 4,
+      "confidence": 5,
+      "remediation": "Enable certificate and hostname verification and use an approved CA bundle for private services."
+    },
+    "PY003": {
+      "enabled": true,
+      "rule_version": "1.0",
+      "title": "Unsafe YAML loader selected",
+      "description": "YAML deserialization uses an unsafe loader that may construct arbitrary Python objects.",
+      "cwe": "CWE-502",
+      "asvs": "V5",
+      "severity": 5,
+      "confidence": 5,
+      "remediation": "Use yaml.safe_load or SafeLoader and validate the resulting data against a strict schema."
+    }
+  }
+}
