@@ -1,7 +1,8 @@
 import logging
+from datetime import timedelta
 
 from celery import shared_task
-from django.db import connection, transaction
+from django.db import connection, models, transaction
 from django.utils import timezone
 
 from .models import AuditEvent, Finding, FindingEvidence, Job, RiskAcceptance, Scan, Tenant
@@ -27,6 +28,11 @@ def execute_scan(tenant_id, scan_id):
         scan.state = Scan.State.RUNNING
         scan.version += 1
         scan.save(update_fields=["state", "version", "updated_at"])
+        Job.objects.filter(payload__scan_id=str(scan_id)).update(
+            state=Job.State.RUNNING,
+            attempts=models.F("attempts") + 1,
+            lease_expires_at=timezone.now() + timedelta(minutes=35),
+        )
     try:
         result = analyze(repository_version=scan.repository_version, scan_id=scan.id)
         with transaction.atomic(), tenant_context(tenant_id):
@@ -57,10 +63,24 @@ def execute_scan(tenant_id, scan_id):
                     end_line=item["end_line"],
                     snippet_hash=item["snippet_hash"],
                 )
+            scan.findings_persisted_at = timezone.now()
             scan.coverage = result["coverage"]
             scan.state = Scan.State.COMPLETED
+            scan.analysis_terminated_at = timezone.now()
             scan.version += 1
-            scan.save(update_fields=["coverage", "state", "version", "updated_at"])
+            scan.save(
+                update_fields=[
+                    "coverage",
+                    "state",
+                    "findings_persisted_at",
+                    "analysis_terminated_at",
+                    "version",
+                    "updated_at",
+                ]
+            )
+            Job.objects.filter(payload__scan_id=str(scan_id)).update(
+                state=Job.State.COMPLETED, lease_expires_at=None, error_code=""
+            )
             AuditEvent.append(
                 tenant=scan.tenant,
                 actor_type="system",
@@ -78,7 +98,9 @@ def execute_scan(tenant_id, scan_id):
         logger.exception("Scan failed for %s", scan_id)
         with transaction.atomic(), tenant_context(tenant_id):
             _database_tenant(tenant_id)
-            Scan.objects.filter(pk=scan_id).update(state=Scan.State.FAILED, version=scan.version + 1)
+            Scan.objects.filter(pk=scan_id).update(
+                state=Scan.State.FAILED, analysis_terminated_at=timezone.now(), version=scan.version + 1
+            )
             Job.objects.filter(payload__scan_id=str(scan_id)).update(
                 state=Job.State.FAILED, error_code=type(exc).__name__[:80]
             )

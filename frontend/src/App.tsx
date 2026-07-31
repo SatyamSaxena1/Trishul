@@ -15,6 +15,16 @@ type Finding = RecordBase & { title: string; severity: number; confidence: numbe
 type Threat = RecordBase & { stride_category: string; scenario: string; likelihood: number; impact: number; status: string };
 type Assessment = RecordBase & { name: string; status: string };
 type Risk = RecordBase & { title: string; state: string };
+type Scan = RecordBase & {
+  state: string;
+  analysis_queued_at: string;
+  analysis_started_at: string | null;
+  analysis_terminated_at: string | null;
+  findings_persisted_at: string | null;
+  first_analyst_review_at: string | null;
+  final_review_outcome_at: string | null;
+  risk_workflow_completed_at: string | null;
+};
 
 const EMPTY_PAGE = { results: [], next: null, previous: null };
 
@@ -93,18 +103,20 @@ function Dashboard({ user }: { user: User }) {
   const [threats, setThreats] = useState<Page<Threat>>(EMPTY_PAGE);
   const [assessments, setAssessments] = useState<Page<Assessment>>(EMPTY_PAGE);
   const [risks, setRisks] = useState<Page<Risk>>(EMPTY_PAGE);
+  const [scans, setScans] = useState<Page<Scan>>(EMPTY_PAGE);
   const api = useMemo(() => new Api(user, tenantId), [user, tenantId]);
 
   useEffect(() => {
     let active = true;
     async function load() {
       try {
-        const [nextContext, appPage, findingPage, threatPage, assessmentPage, riskPage] = await Promise.all([
+        const [nextContext, appPage, findingPage, threatPage, assessmentPage, riskPage, scanPage] = await Promise.all([
           api.request<Context>("context"), api.list<Application>("applications/"), api.list<Finding>("findings/"),
           api.list<Threat>("threats/"), api.list<Assessment>("assessments/"), api.list<Risk>("risks/"),
+          api.list<Scan>("scans/"),
         ]);
         if (!active) return;
-        setContext(nextContext); setApplications(appPage); setFindings(findingPage); setThreats(threatPage); setAssessments(assessmentPage); setRisks(riskPage); setError("");
+        setContext(nextContext); setApplications(appPage); setFindings(findingPage); setThreats(threatPage); setAssessments(assessmentPage); setRisks(riskPage); setScans(scanPage); setError("");
         if (!tenantId) { setTenantId(nextContext.tenant.id); localStorage.setItem("trishul.tenant", nextContext.tenant.id); }
       } catch (reason) {
         if (active) setError(reason instanceof ApiError ? reason.message : "Unable to load security intelligence.");
@@ -136,6 +148,7 @@ function Dashboard({ user }: { user: User }) {
           <article><span>Open threats</span><strong>{threats.results.filter((item) => item.status === "open" || item.status === "draft").length}</strong></article>
           <article><span>Active risks</span><strong>{risks.results.filter((item) => item.state !== "closed").length}</strong></article>
         </section>
+        <section className="panel" id="workflow"><p className="eyebrow">WORKFLOW</p><h2>Analysis lifecycle</h2>{scans.results.map((item) => <article className="item" key={item.id}><div><strong>{item.state.replaceAll("_", " ")}</strong><small>{item.final_review_outcome_at ? "Review complete" : item.first_analyst_review_at ? "Review in progress" : item.findings_persisted_at ? "Awaiting analyst review" : item.analysis_started_at ? "Analysis running" : "Analysis queued"}{item.risk_workflow_completed_at ? " · Risk workflow complete" : ""}</small></div><span>{new Date(item.analysis_queued_at).toLocaleString()}</span></article>)}{!scans.results.length && <p className="empty">No analyses submitted.</p>}</section>
         <section className="panel" id="applications"><div className="section-title"><div><p className="eyebrow">PORTFOLIO</p><h2>Applications</h2></div><AppWizard api={api} onCreated={() => setRefresh((value) => value + 1)} /></div><table><thead><tr><th>Name</th><th>Criticality</th><th>Exposure</th></tr></thead><tbody>{applications.results.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.description}</small></td><td>{severityLabel(item.criticality)}</td><td>{item.internet_exposed ? "Internet" : "Internal"}</td></tr>)}</tbody></table>{!applications.results.length && <p className="empty">No applications registered.</p>}</section>
         <div className="two-column">
           <section className="panel" id="findings"><p className="eyebrow">CODE REVIEW</p><h2>Findings</h2>{findings.results.map((item) => <article className="item" key={item.id}><div><strong>{item.title}</strong><small>{item.cwe || "Unmapped"} · {item.status.replaceAll("_", " ")}</small></div><span className={`severity severity-${item.severity}`}>{severityLabel(item.severity)}</span></article>)}{!findings.results.length && <p className="empty">No evidence-backed findings.</p>}</section>
@@ -155,4 +168,3 @@ export default function App() {
   if (user === undefined) return <main className="loading">Loading secure workspace…</main>;
   return user ? <Dashboard user={user} /> : <Login error={error} />;
 }
-
