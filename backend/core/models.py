@@ -247,6 +247,10 @@ class Job(TenantScopedModel):
     payload = models.JSONField(default=dict)
     attempts = models.PositiveSmallIntegerField(default=0)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
+    lease_token = models.UUIDField(null=True, blank=True, editable=False)
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+    analyzer_ref = models.CharField(max_length=200, blank=True)
+    scratch_ref = models.CharField(max_length=200, blank=True)
     error_code = models.CharField(max_length=80, blank=True)
 
 

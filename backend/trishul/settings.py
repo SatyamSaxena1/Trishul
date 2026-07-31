@@ -129,6 +129,8 @@ CELERY_TASK_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_TASK_TIME_LIMIT = 2100
+CELERY_TASK_SOFT_TIME_LIMIT = 2040
 CELERY_BEAT_SCHEDULE = {
     "reconcile-jobs": {"task": "core.tasks.reconcile_jobs", "schedule": 60.0},
     "expire-acceptances": {"task": "core.tasks.expire_acceptances", "schedule": 3600.0},
