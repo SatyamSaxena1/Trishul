@@ -24,7 +24,7 @@ Only the AI gateway receives endpoint credentials and model-network access. Endp
 
 ## Analysis boundary
 
-The controller refuses `/var/run/docker.sock` operationally. It uses a dedicated rootless runtime account and launches analyzer images by digest outside development. Job containers receive one repository archive and one output volume, no network, no application/database/model secrets, and bounded CPU, memory, PIDs, storage, and time.
+The controller uses a dedicated rootless runtime account and launches analyzer images by digest. Installation refuses any runtime socket whose daemon does not report rootless mode and proves the effective analyzer sandbox with a disposable, content-free test. Job containers receive one read-only repository input volume and bounded output/tmpfs locations, no network or application/database/OIDC/model/backup/service-token secrets, a read-only root filesystem, no capabilities or privilege escalation, and bounded CPU, memory, PIDs, disk, and wall-clock time. Their mount set excludes the rootful host socket and every other host path.
 
 On Kubernetes, the controller has namespace-scoped permission only to create, read, and delete Jobs and scratch PVCs. Separate staging and collection Jobs use short-lived presigned object URLs; the analyzer Job receives neither URLs nor service-account credentials and is selected by an explicit no-network policy. Access to Job specifications must remain limited because staging URLs are usable until their short expiry.
 

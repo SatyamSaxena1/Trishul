@@ -11,7 +11,9 @@ Production should reserve at least 4 CPU cores, 12 GiB RAM, and 50 GiB local dis
 
 ## Installation
 
-Run `sh bin/trishulctl doctor` before every first installation or host change. It rejects missing configuration, weak secret-file permissions, missing rootless runtime sockets, rootful socket paths, invalid Compose configuration, and inadequate disk.
+Run `sh bin/trishulctl doctor` before every first installation or host change. It rejects missing configuration, weak secret-file permissions, missing rootless runtime sockets, rootful runtimes (based on the runtime's own security report, not merely the socket path), invalid Compose configuration, and inadequate disk. Installation runs this check automatically and fails closed.
+
+The doctor also creates and runs a disposable empty-archive analyzer container. It inspects the effective runtime configuration to prove that networking is disabled; sensitive application, database, OIDC, model, backup, and service-token environment variables are absent; the root filesystem is read-only; all capabilities are dropped; privilege escalation and privileged mode are disabled; CPU, memory, PIDs, temporary disk, output disk, and wall-clock time are bounded; and only a read-only input volume plus bounded `/tmp` and `/output` tmpfs locations exist. The analyzer reference must be SHA-256 digest-pinned and the inspected mounts must not expose a host container socket. The procedure emits only check names and pass/fail state: it never logs archive paths, environment values, mount source paths, findings, or repository content.
 
 `sh bin/trishulctl install` starts migrations first, waits on dependency health, starts stateless services, and requires application readiness before success.
 

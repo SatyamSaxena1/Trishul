@@ -43,6 +43,36 @@ RESULT_SCHEMA = {
     },
 }
 
+MAX_INPUT_BYTES = 100 * 1024 * 1024
+MAX_RESULT_BYTES = 10 * 1024 * 1024
+ANALYZER_TIMEOUT_SECONDS = 1800
+
+
+def analyzer_create_command(cli, *, container, image, input_volume):
+    """Build the analyzer sandbox command; installation verification mirrors these controls."""
+    return [
+        cli,
+        "create",
+        "--name",
+        container,
+        "--network=none",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        "--pids-limit=256",
+        "--memory=4g",
+        "--memory-swap=4g",
+        "--cpus=2",
+        "--user=65532:65532",
+        "--tmpfs=/tmp:rw,noexec,nosuid,size=2g,mode=0700,uid=65532,gid=65532",
+        "--tmpfs=/output:rw,noexec,nosuid,size=11m,mode=0700,uid=65532,gid=65532",
+        "--volume",
+        f"{input_volume}:/input:ro",
+        image,
+        "/input/repository.archive",
+        "/output/results.json",
+    ]
+
 
 def _run(command, *, timeout=120, capture=False):
     return subprocess.run(  # noqa: S603 - executable is restricted; arguments are never shell parsed.
@@ -67,58 +97,28 @@ def analyze(*, repository_version, scan_id):
     image = os.getenv("ANALYZER_IMAGE", "trishul-analyzer:development")
     if not settings.DEBUG and "@sha256:" not in image:
         raise RuntimeError("ANALYZER_IMAGE must be pinned by digest outside development")
-    volume = f"trishul-job-{scan_id}"
+    volume = f"trishul-job-input-{scan_id}"
     container = f"trishul-analyzer-{scan_id}"
     with tempfile.TemporaryDirectory(prefix="trishul-controller-") as directory:
         archive_path = Path(directory) / "input.archive"
         result_path = Path(directory) / "results.json"
         download_file(repository_version.object_key, str(archive_path))
+        if archive_path.stat().st_size > MAX_INPUT_BYTES:
+            raise RuntimeError("Analyzer input exceeds 100 MiB")
         try:
             _run([cli, "volume", "create", volume])
-            _run(
-                [
-                    cli,
-                    "run",
-                    "--rm",
-                    "--network=none",
-                    "--read-only",
-                    "--cap-drop=ALL",
-                    "--security-opt=no-new-privileges",
-                    "--entrypoint=python",
-                    "--user=0:0",
-                    "--volume",
-                    f"{volume}:/work",
-                    image,
-                    "-c",
-                    "import os; os.chown('/work', 65532, 65532)",
-                ]
-            )
-            _run(
-                [
-                    cli,
-                    "create",
-                    "--name",
-                    container,
-                    "--network=none",
-                    "--read-only",
-                    "--cap-drop=ALL",
-                    "--security-opt=no-new-privileges",
-                    "--pids-limit=256",
-                    "--memory=4g",
-                    "--cpus=2",
-                    "--user=65532:65532",
-                    "--tmpfs=/tmp:rw,noexec,nosuid,size=2g",
-                    "--volume",
-                    f"{volume}:/work",
-                    image,
-                    "/work/input.archive",
-                    "/work/results.json",
-                ]
-            )
-            _run([cli, "cp", str(archive_path), f"{container}:/work/input.archive"])
-            _run([cli, "start", "--attach", container], timeout=1800, capture=True)
-            _run([cli, "cp", f"{container}:/work/results.json", str(result_path)])
-            if result_path.stat().st_size > 10 * 1024 * 1024:
+            helper = f"{container}-input"
+            _run([cli, "create", "--name", helper, "--volume", f"{volume}:/input", image])
+            try:
+                _run([cli, "cp", str(archive_path), f"{helper}:/input/repository.archive"])
+            finally:
+                subprocess.run(  # noqa: S603 - validated OCI CLI and generated helper name.
+                    [cli, "rm", "--force", helper], check=False, capture_output=True, shell=False
+                )
+            _run(analyzer_create_command(cli, container=container, image=image, input_volume=volume))
+            _run([cli, "start", "--attach", container], timeout=ANALYZER_TIMEOUT_SECONDS, capture=True)
+            _run([cli, "cp", f"{container}:/output/results.json", str(result_path)])
+            if result_path.stat().st_size > MAX_RESULT_BYTES:
                 raise RuntimeError("Analyzer result exceeds 10 MiB")
             result = json.loads(result_path.read_text(encoding="utf-8"))
             validate(result, RESULT_SCHEMA)
