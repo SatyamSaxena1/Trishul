@@ -41,4 +41,4 @@ On Windows, replace `.venv/bin` with `.venv/Scripts`.
 5. Run `sh bin/trishulctl doctor`, then `sh bin/trishulctl install`.
 6. Bootstrap the first OIDC subject with `sh bin/trishulctl bootstrap SUBJECT EMAIL TENANT_SLUG "Tenant Name"`.
 
-See [operations](docs/operations.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), and [architecture](docs/architecture.md).
+See the [deployment threat model and customer-data gate](docs/deployment-threat-model.md), [operations](docs/operations.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), and [architecture](docs/architecture.md).
