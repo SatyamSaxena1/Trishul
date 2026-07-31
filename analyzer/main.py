@@ -13,40 +13,20 @@ try:
 except ImportError:  # Local regression tests import the application copy.
     from core.archive import inspect_archive
 
-PACK = "python-stdlib"
-VERSION = "1.0"
+RULE_CONFIG_PATH = Path(__file__).with_name("rules") / "v1.json"
 
-RULES = {
-    "PY001": {
-        "title": "Shell command execution enabled",
-        "description": "A subprocess call enables shell parsing. Confirm whether untrusted data can reach the command.",
-        "cwe": "CWE-78",
-        "asvs": "V5",
-        "severity": 5,
-        "confidence": 4,
-        "remediation": "Pass an argument list with shell=False and validate every externally controlled argument.",
-    },
-    "PY002": {
-        "title": "TLS certificate verification disabled",
-        "description": "An outbound request explicitly disables certificate verification.",
-        "cwe": "CWE-295",
-        "asvs": "V9",
-        "severity": 4,
-        "confidence": 5,
-        "remediation": (
-            "Enable certificate and hostname verification and use an approved CA bundle for private services."
-        ),
-    },
-    "PY003": {
-        "title": "Unsafe YAML loader selected",
-        "description": "YAML deserialization uses an unsafe loader that may construct arbitrary Python objects.",
-        "cwe": "CWE-502",
-        "asvs": "V5",
-        "severity": 5,
-        "confidence": 5,
-        "remediation": "Use yaml.safe_load or SafeLoader and validate the resulting data against a strict schema.",
-    },
-}
+
+def load_rule_config(path=RULE_CONFIG_PATH):
+    config = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not config.get("configuration_version") or not config.get("pack_version"):
+        raise ValueError("Rule configuration must be versioned")
+    return config
+
+
+RULE_CONFIG = load_rule_config()
+PACK = RULE_CONFIG["pack"]
+VERSION = RULE_CONFIG["pack_version"]
+RULES = RULE_CONFIG["rules"]
 
 
 def call_name(node):
@@ -59,12 +39,12 @@ def call_name(node):
 
 
 def finding(rule_id, path, node, source_lines):
-    rule = RULES[rule_id]
+    rule = {key: value for key, value in RULES[rule_id].items() if key not in {"enabled", "rule_version"}}
     line = source_lines[node.lineno - 1].strip().encode()
     fingerprint = hashlib.sha256(f"{rule_id}:{path}:{node.lineno}:{node.col_offset}".encode()).hexdigest()
     return {
         "rule_id": rule_id,
-        "rule_version": VERSION,
+        "rule_version": RULES[rule_id]["rule_version"],
         **rule,
         "status": "needs_validation",
         "fingerprint": fingerprint,
@@ -94,7 +74,8 @@ def scan_python(path, relative):
         if name in {"subprocess.run", "subprocess.call", "subprocess.Popen", "os.system"} and (
             name == "os.system" or isinstance(shell, ast.Constant) and shell.value is True
         ):
-            results.append(finding("PY001", relative, node, lines))
+            if RULES["PY001"]["enabled"]:
+                results.append(finding("PY001", relative, node, lines))
         if (
             name.endswith(
                 ("requests.get", "requests.post", "requests.put", "requests.delete", "httpx.get", "httpx.post")
@@ -102,9 +83,11 @@ def scan_python(path, relative):
             and isinstance(verify, ast.Constant)
             and verify.value is False
         ):
-            results.append(finding("PY002", relative, node, lines))
+            if RULES["PY002"]["enabled"]:
+                results.append(finding("PY002", relative, node, lines))
         if name.endswith("yaml.load") and loader and call_name(loader).endswith(("UnsafeLoader", "FullLoader")):
-            results.append(finding("PY003", relative, node, lines))
+            if RULES["PY003"]["enabled"]:
+                results.append(finding("PY003", relative, node, lines))
     return results, True
 
 
@@ -148,6 +131,7 @@ def main():
     output = {
         "pack": PACK,
         "pack_version": VERSION,
+        "rule_configuration_version": RULE_CONFIG["configuration_version"],
         "coverage": {
             "status": "experimental",
             "analyzed_python_files": analyzed,

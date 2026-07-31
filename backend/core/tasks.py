@@ -57,7 +57,10 @@ def execute_scan(tenant_id, scan_id):
                     end_line=item["end_line"],
                     snippet_hash=item["snippet_hash"],
                 )
-            scan.coverage = result["coverage"]
+            scan.coverage = {
+                **result["coverage"],
+                "rule_configuration_version": result["rule_configuration_version"],
+            }
             scan.state = Scan.State.COMPLETED
             scan.version += 1
             scan.save(update_fields=["coverage", "state", "version", "updated_at"])
