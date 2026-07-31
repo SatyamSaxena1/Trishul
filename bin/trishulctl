@@ -28,6 +28,10 @@ doctor() {
     $COMPOSE config --quiet
     available_kb="$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')"
     [ "$available_kb" -ge 10485760 ] || die "at least 10 GiB free disk is required"
+    DOCKER_HOST="unix://$ROOTLESS_OCI_SOCKET" \
+        TRISHUL_ANALYZER_IMAGE="$TRISHUL_ANALYZER_IMAGE" \
+        python3 "$ROOT/scripts/verify_analyzer_isolation.py" \
+        || die "analyzer isolation verification failed; installation is unsafe"
     info "AI Trishul deployment prerequisites passed"
 }
 
