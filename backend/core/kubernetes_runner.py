@@ -61,10 +61,12 @@ class KubernetesAPI:
             "POST", f"/api/v1/namespaces/{self.namespace}/persistentvolumeclaims", body=body
         )
 
-    def wait_job(self, name, timeout):
+    def wait_job(self, name, timeout, heartbeat=None):
         deadline = time.monotonic() + timeout
         path = f"/apis/batch/v1/namespaces/{self.namespace}/jobs/{name}"
         while time.monotonic() < deadline:
+            if heartbeat:
+                heartbeat()
             status = self.request("GET", path).get("status", {})
             if status.get("succeeded") == 1:
                 return
@@ -92,6 +94,34 @@ class KubernetesAPI:
             f"/api/v1/namespaces/{self.namespace}/persistentvolumeclaims/{name}",
             allow_not_found=True,
         )
+
+
+def _names(scan_id):
+    suffix = str(scan_id).replace("-", "")[:20]
+    return f"scan-{suffix}", f"stage-{suffix}", f"analyze-{suffix}", f"collect-{suffix}"
+
+
+def analyzer_status(scan_id):
+    try:
+        api = KubernetesAPI()
+        _, stage, analyzer, collect = _names(scan_id)
+        workloads = [
+            api.request(
+                "GET", f"/apis/batch/v1/namespaces/{api.namespace}/jobs/{name}", allow_not_found=True
+            )
+            for name in (stage, analyzer, collect)
+        ]
+    except Exception:
+        return "unknown"
+    return "active" if any(item.get("status", {}).get("active") for item in workloads) else "inactive"
+
+
+def cleanup_resources(scan_id):
+    api = KubernetesAPI()
+    pvc, stage, analyzer, collect = _names(scan_id)
+    for job in (stage, analyzer, collect):
+        api.cleanup(job)
+    api.cleanup_pvc(pvc)
 
 
 def _security_context(uid):
@@ -148,13 +178,9 @@ def _job(name, role, image, command, pvc, *, cpu="500m", memory="512Mi", deadlin
     return body
 
 
-def analyze(*, repository_version, scan_id):
+def analyze(*, repository_version, scan_id, heartbeat=None):
     api = KubernetesAPI()
-    suffix = str(scan_id).replace("-", "")[:20]
-    pvc = f"scan-{suffix}"
-    stage = f"stage-{suffix}"
-    analyzer = f"analyze-{suffix}"
-    collect = f"collect-{suffix}"
+    pvc, stage, analyzer, collect = _names(scan_id)
     result_key = f"{repository_version.tenant_id}/scan-results/{scan_id}.json"
     storage_class = os.getenv("KUBE_SCRATCH_STORAGE_CLASS")
     pvc_spec = {
@@ -190,7 +216,7 @@ def analyze(*, repository_version, scan_id):
                 pvc,
             )
         )
-        api.wait_job(stage, 900)
+        api.wait_job(stage, 900, heartbeat)
         api.create_job(
             _job(
                 analyzer,
@@ -203,7 +229,7 @@ def analyze(*, repository_version, scan_id):
                 deadline=1800,
             )
         )
-        api.wait_job(analyzer, 1800)
+        api.wait_job(analyzer, 1800, heartbeat)
         api.create_job(
             _job(
                 collect,
@@ -222,7 +248,7 @@ def analyze(*, repository_version, scan_id):
                 pvc,
             )
         )
-        api.wait_job(collect, 900)
+        api.wait_job(collect, 900, heartbeat)
         with tempfile.TemporaryDirectory(prefix="trishul-kube-result-") as directory:
             result_path = Path(directory) / "result.json"
             download_file(result_key, str(result_path))
