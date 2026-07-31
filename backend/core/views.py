@@ -350,7 +350,11 @@ class ScanViewSet(viewset_for(Scan)):
             or serializer.validated_data.get("language_pack_version") != "1.0"
         ):
             raise exceptions.ValidationError(
-                {"language_pack": "Only the experimental python-stdlib 1.0 pack is installed."}
+                {
+                    "language_pack": (
+                        "Only python-stdlib 1.0 is installed; coverage is limited to its experimental pilot matrix."
+                    )
+                }
             )
         super().perform_create(serializer)
         scan = serializer.instance
