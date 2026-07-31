@@ -9,9 +9,14 @@
 
 Production should reserve at least 4 CPU cores, 12 GiB RAM, and 50 GiB local disk plus object-storage capacity. Analyzer concurrency and resource ceilings must be calibrated to the customer host.
 
+The acceptance procedure for a new pilot host—including synthetic-data scanning,
+coordinated recovery, failure injection, rollback, evidence capture, and the
+qualification report template—is the [pilot qualification runbook](pilot-qualification.md).
+Do not open a pilot to users until that procedure has a passing report.
+
 ## Installation
 
-Run `sh bin/trishulctl doctor` before every first installation or host change. It rejects missing configuration, weak secret-file permissions, missing rootless runtime sockets, rootful socket paths, invalid Compose configuration, and inadequate disk.
+Run `sh bin/trishulctl doctor` before every first installation or host change. It rejects missing configuration, weak secret-file permissions, missing rootless runtime sockets, rootful socket paths, invalid Compose configuration, and inadequate CPU, memory, or free disk.
 
 `sh bin/trishulctl install` starts migrations first, waits on dependency health, starts stateless services, and requires application readiness before success.
 
