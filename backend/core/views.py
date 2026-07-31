@@ -10,7 +10,8 @@ from datetime import timedelta
 import httpx
 import redis
 from django.conf import settings
-from django.db import connection, transaction
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
@@ -344,27 +345,76 @@ class RiskViewSet(viewset_for(Risk)):
 
 
 class ScanViewSet(viewset_for(Scan)):
-    def perform_create(self, serializer):
-        if (
-            serializer.validated_data.get("language_pack") != "python-stdlib"
-            or serializer.validated_data.get("language_pack_version") != "1.0"
-        ):
+    def _submission_key(self, data):
+        repository_version = data["repository_version"]
+        explicit = self.request.headers.get("Idempotency-Key") or self.request.data.get("idempotency_key")
+        if explicit is not None and (not isinstance(explicit, str) or not explicit.strip() or len(explicit) > 200):
+            raise exceptions.ValidationError(
+                {"idempotency_key": "Must be a non-empty string of at most 200 characters."}
+            )
+        material = {
+            "repository_version": str(repository_version.id),
+            "repository_sha256": repository_version.sha256,
+            "analyzer": data["language_pack"],
+            "analyzer_version": data["language_pack_version"],
+            "configuration": data.get("configuration", {}),
+            "enabled_rules": sorted(set(data.get("enabled_rules", []))),
+            # An explicit key scopes retries of one caller operation, while all
+            # immutable analysis inputs prevent accidental key reuse.
+            "client_key": explicit.strip() if explicit else None,
+        }
+        return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def create(self, request, *args, **kwargs):
+        # idempotency_key is an API-only field and is deliberately not persisted
+        # in plaintext.
+        submitted = request.data.copy()
+        submitted.pop("idempotency_key", None)
+        serializer = self.get_serializer(data=submitted)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        if data.get("language_pack") != "python-stdlib" or data.get("language_pack_version") != "1.0":
             raise exceptions.ValidationError(
                 {"language_pack": "Only the experimental python-stdlib 1.0 pack is installed."}
             )
-        super().perform_create(serializer)
-        scan = serializer.instance
-        Job.all_objects.create(
-            tenant=self.request.tenant,
-            application=scan.repository_version.repository.application,
-            kind="scan",
-            payload={"scan_id": str(scan.id)},
-        )
-        from .tasks import execute_scan
+        key = self._submission_key(data)
+        existing = Job.all_objects.filter(
+            tenant=request.tenant,
+            idempotency_key=key,
+            state__in=[Job.State.QUEUED, Job.State.RUNNING, Job.State.COMPLETED],
+        ).first()
+        created = False
+        if existing is None:
+            try:
+                with transaction.atomic():
+                    scan = serializer.save(tenant=request.tenant, coverage={"status": "pending"})
+                    existing = Job.all_objects.create(
+                        tenant=request.tenant,
+                        application=scan.repository_version.repository.application,
+                        kind="scan",
+                        payload={"scan_id": str(scan.id)},
+                        idempotency_key=key,
+                    )
+                    created = True
+            except (IntegrityError, DjangoValidationError):
+                # A concurrent transaction won the conditional unique-key race.
+                existing = Job.all_objects.get(
+                    tenant=request.tenant,
+                    idempotency_key=key,
+                    state__in=[Job.State.QUEUED, Job.State.RUNNING, Job.State.COMPLETED],
+                )
+        scan = Scan.all_objects.get(pk=existing.payload["scan_id"], tenant=request.tenant)
+        if existing.dispatch_pending:
+            from .tasks import publish_scan
 
-        transaction.on_commit(
-            lambda: execute_scan.apply_async(args=[str(self.request.tenant.id), str(scan.id)], queue="analysis")
-        )
+            # Publication failure is recorded by publish_scan; it never turns a
+            # committed submission into an HTTP 500 or loses the dispatch intent.
+            transaction.on_commit(lambda: publish_scan(str(existing.id)))
+        response = self.get_serializer(scan).data
+        response["job"] = SERIALIZERS[Job](existing).data
+        response["deduplicated"] = not created
+        headers = self.get_success_headers(response)
+        return Response(response, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK, headers=headers)
 
 
 class ThreatModelViewSet(viewset_for(ThreatModel)):
