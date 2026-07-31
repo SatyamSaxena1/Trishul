@@ -5,8 +5,10 @@ import tempfile
 from pathlib import Path
 
 from django.conf import settings
+from django.utils import timezone
 from jsonschema import validate
 
+from .models import Scan
 from .storage import download_file
 
 RESULT_SCHEMA = {
@@ -57,6 +59,10 @@ def _run(command, *, timeout=120, capture=False):
 
 
 def analyze(*, repository_version, scan_id):
+    # The runner owns the actual execution boundary; queue wait is measured before this point.
+    Scan.all_objects.filter(
+        tenant_id=repository_version.tenant_id, pk=scan_id, analysis_started_at__isnull=True
+    ).update(analysis_started_at=timezone.now())
     if os.getenv("RUNNER_BACKEND", "oci") == "kubernetes":
         from .kubernetes_runner import analyze as kubernetes_analyze
 

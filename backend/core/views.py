@@ -45,6 +45,7 @@ from .models import (
     Remediation,
     Report,
     Repository,
+    RepositorySubmission,
     RepositoryVersion,
     Requirement,
     Risk,
@@ -62,6 +63,7 @@ from .security import ServicePrincipal, has_permission, principal_permissions, r
 from .serializers import SERIALIZERS
 from .storage import healthcheck as storage_healthcheck
 from .storage import put_file
+from .workflow_metrics import render_workflow_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -303,26 +305,61 @@ class RepositoryViewSet(viewset_for(Repository)):
     @action(detail=True, methods=["post"], url_path="imports")
     def import_archive(self, request, pk=None):
         repository = self.get_object()
+        received_at = timezone.now()
         uploaded = request.FILES.get("archive")
         if not uploaded:
             raise exceptions.ValidationError({"archive": "A ZIP or TAR archive is required."})
+        validation_started_at = timezone.now()
+        receipt = RepositorySubmission.all_objects.create(
+            tenant=request.tenant,
+            repository=repository,
+            received_at=received_at,
+            validation_started_at=validation_started_at,
+        )
         try:
             manifest = inspect_archive(uploaded)
         except UnsafeArchive as exc:
+            RepositorySubmission.all_objects.filter(pk=receipt.pk, tenant=request.tenant).update(
+                validation_completed_at=timezone.now(), validation_outcome="rejected"
+            )
             raise exceptions.ValidationError({"archive": str(exc)}) from exc
+        RepositorySubmission.all_objects.filter(pk=receipt.pk, tenant=request.tenant).update(
+            validation_completed_at=timezone.now(), validation_outcome="accepted"
+        )
         key = f"{request.tenant.id}/repositories/{repository.id}/{manifest['sha256']}.archive"
         put_file(key, uploaded, content_type=uploaded.content_type or "application/octet-stream")
         version, _ = RepositoryVersion.all_objects.get_or_create(
             tenant=request.tenant,
             repository=repository,
             sha256=manifest["sha256"],
-            defaults={"object_key": key, "size": manifest["compressed_size"] or uploaded.size, "manifest": manifest},
+            defaults={
+                "object_key": key,
+                "size": manifest["compressed_size"] or uploaded.size,
+                "manifest": manifest,
+                "submission_received_at": received_at,
+                "archive_validation_started_at": validation_started_at,
+                "archive_validation_completed_at": timezone.now(),
+            },
         )
         self._audit("repository.imported", version)
         return Response(SERIALIZERS[RepositoryVersion](version).data, status=status.HTTP_201_CREATED)
 
 
+def mark_risk_workflow_completed(risk):
+    """Close measurements only for scans explicitly linked to this tenant's risk."""
+    finding_ids = RiskLink.objects.filter(risk=risk, source_type="finding").values_list("source_id", flat=True)
+    scan_ids = Finding.objects.filter(id__in=finding_ids).values_list("scan_id", flat=True)
+    Scan.objects.filter(id__in=scan_ids, risk_workflow_completed_at__isnull=True).update(
+        risk_workflow_completed_at=timezone.now()
+    )
+
+
 class RiskViewSet(viewset_for(Risk)):
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        if serializer.instance.state in {"accepted", "closed", "mitigated"}:
+            mark_risk_workflow_completed(serializer.instance)
+
     @action(detail=True, methods=["post"], url_path="scores")
     def score(self, request, pk=None):
         risk = self.get_object()
@@ -365,6 +402,24 @@ class ScanViewSet(viewset_for(Scan)):
         transaction.on_commit(
             lambda: execute_scan.apply_async(args=[str(self.request.tenant.id), str(scan.id)], queue="analysis")
         )
+
+
+class FindingViewSet(viewset_for(Finding)):
+    def perform_update(self, serializer):
+        previous_status = serializer.instance.status
+        super().perform_update(serializer)
+        current_status = serializer.instance.status
+        if current_status == previous_status:
+            return
+        now = timezone.now()
+        scan_id = serializer.instance.scan_id
+        reviewed = {Finding.Status.CONFIRMED, Finding.Status.FALSE_POSITIVE, Finding.Status.RESOLVED}
+        if current_status in reviewed:
+            Scan.objects.filter(pk=scan_id, first_analyst_review_at__isnull=True).update(first_analyst_review_at=now)
+            if not Finding.objects.filter(scan_id=scan_id).exclude(status__in=reviewed).exists():
+                Scan.objects.filter(pk=scan_id, final_review_outcome_at__isnull=True).update(
+                    final_review_outcome_at=now
+                )
 
 
 class ThreatModelViewSet(viewset_for(ThreatModel)):
@@ -432,6 +487,7 @@ class ApprovalViewSet(viewset_for(Approval, immutable=True)):
         acceptance.status = "approved" if approval.decision == "approved" else "rejected"
         acceptance.version += 1
         acceptance.save(update_fields=["status", "version", "updated_at"])
+        mark_risk_workflow_completed(acceptance.risk)
         self._audit("risk_acceptance.decided", approval)
 
 
@@ -535,7 +591,7 @@ MODEL_VIEWSETS = {
     "repository-versions": viewset_for(RepositoryVersion, immutable=True),
     "jobs": viewset_for(Job),
     "scans": ScanViewSet,
-    "findings": viewset_for(Finding),
+    "findings": FindingViewSet,
     "finding-evidence": viewset_for(FindingEvidence, immutable=True),
     "threat-models": ThreatModelViewSet,
     "architecture-components": viewset_for(ArchitectureComponent),
@@ -674,7 +730,8 @@ def metrics(request):
     supplied = request.headers.get("X-Metrics-Token", "")
     if configured and not hmac.compare_digest(hashlib.sha256(supplied.encode()).hexdigest(), expected):
         return Response(status=403)
-    return HttpResponse(generate_latest(), content_type=CONTENT_TYPE_LATEST)
+    payload = generate_latest() + render_workflow_metrics()
+    return HttpResponse(payload, content_type=CONTENT_TYPE_LATEST)
 
 
 @api_view(["POST"])

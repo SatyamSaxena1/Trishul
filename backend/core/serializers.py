@@ -79,9 +79,30 @@ WorkspaceSerializer = serializer_for(Workspace)
 ApplicationSerializer = serializer_for(Application)
 MembershipSerializer = serializer_for(Membership)
 RepositorySerializer = serializer_for(Repository)
-RepositoryVersionSerializer = serializer_for(RepositoryVersion, read_only_fields=("immutable",))
+RepositoryVersionSerializer = serializer_for(
+    RepositoryVersion,
+    read_only_fields=(
+        "immutable",
+        "submission_received_at",
+        "archive_validation_started_at",
+        "archive_validation_completed_at",
+    ),
+)
 JobSerializer = serializer_for(Job)
-ScanSerializer = serializer_for(Scan, read_only_fields=("state", "coverage"))
+ScanSerializer = serializer_for(
+    Scan,
+    read_only_fields=(
+        "state",
+        "coverage",
+        "analysis_queued_at",
+        "analysis_started_at",
+        "analysis_terminated_at",
+        "findings_persisted_at",
+        "first_analyst_review_at",
+        "final_review_outcome_at",
+        "risk_workflow_completed_at",
+    ),
+)
 FindingSerializer = serializer_for(Finding)
 FindingEvidenceSerializer = serializer_for(FindingEvidence)
 ThreatModelSerializer = serializer_for(ThreatModel)

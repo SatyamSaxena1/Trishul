@@ -226,11 +226,24 @@ class RepositoryVersion(TenantScopedModel):
     size = models.PositiveBigIntegerField()
     manifest = models.JSONField(default=dict)
     immutable = models.BooleanField(default=True)
+    submission_received_at = models.DateTimeField(null=True, blank=True)
+    archive_validation_started_at = models.DateTimeField(null=True, blank=True)
+    archive_validation_completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["tenant", "repository", "sha256"], name="repository_version_hash_uniq")
         ]
+
+
+class RepositorySubmission(TenantScopedModel):
+    """Content-free receipt used to measure both accepted and rejected uploads."""
+
+    repository = models.ForeignKey(Repository, on_delete=models.PROTECT)
+    received_at = models.DateTimeField(default=timezone.now)
+    validation_started_at = models.DateTimeField(null=True, blank=True)
+    validation_completed_at = models.DateTimeField(null=True, blank=True)
+    validation_outcome = models.CharField(max_length=20, blank=True)
 
 
 class Job(TenantScopedModel):
@@ -263,6 +276,13 @@ class Scan(TenantScopedModel):
     language_pack = models.CharField(max_length=100)
     language_pack_version = models.CharField(max_length=40)
     coverage = models.JSONField(default=dict)
+    analysis_queued_at = models.DateTimeField(default=timezone.now)
+    analysis_started_at = models.DateTimeField(null=True, blank=True)
+    analysis_terminated_at = models.DateTimeField(null=True, blank=True)
+    findings_persisted_at = models.DateTimeField(null=True, blank=True)
+    first_analyst_review_at = models.DateTimeField(null=True, blank=True)
+    final_review_outcome_at = models.DateTimeField(null=True, blank=True)
+    risk_workflow_completed_at = models.DateTimeField(null=True, blank=True)
 
 
 class Finding(TenantScopedModel):
