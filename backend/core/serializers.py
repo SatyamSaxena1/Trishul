@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import serializers
 
 from .ai_gateway import validate_endpoint
@@ -82,7 +83,23 @@ RepositorySerializer = serializer_for(Repository)
 RepositoryVersionSerializer = serializer_for(RepositoryVersion, read_only_fields=("immutable",))
 JobSerializer = serializer_for(Job)
 ScanSerializer = serializer_for(Scan, read_only_fields=("state", "coverage"))
-FindingSerializer = serializer_for(Finding)
+class FindingSerializer(TenantModelSerializer):
+    class Meta:
+        model = Finding
+        fields = "__all__"
+        read_only_fields = (
+            "tenant", "version", "created_at", "updated_at", "scan", "repository_version",
+            "rule_id", "rule_version", "analyzer_name", "analyzer_version", "analyzer_image_digest",
+            "severity", "file_path", "start_line", "end_line", "evidence", "remediation", "fingerprint",
+            "decision_at",
+        )
+
+    def update(self, instance, validated_data):
+        if "analyst_decision" in validated_data and validated_data["analyst_decision"] != instance.analyst_decision:
+            validated_data["decision_at"] = timezone.now()
+        return super().update(instance, validated_data)
+
+
 FindingEvidenceSerializer = serializer_for(FindingEvidence)
 ThreatModelSerializer = serializer_for(ThreatModel)
 ArchitectureComponentSerializer = serializer_for(ArchitectureComponent)

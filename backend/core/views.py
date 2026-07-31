@@ -462,11 +462,10 @@ class ReportViewSet(viewset_for(Report, immutable=True)):
         report_type = request.data.get("report_type", "technical")
         if report_type not in {"technical", "executive"}:
             raise exceptions.ValidationError({"report_type": "Use technical or executive."})
-        findings = list(
-            Finding.objects.filter(scan__repository_version__repository__application=application).values(
-                "id", "title", "severity", "confidence", "status", "cwe"
-            )
-        )
+        finding_records = Finding.objects.filter(
+            scan__repository_version__repository__application=application
+        ).order_by("created_at", "id")
+        findings = SERIALIZERS[Finding](finding_records, many=True).data
         threats = list(
             Threat.objects.filter(threat_model__application=application).values(
                 "id", "stride_category", "scenario", "likelihood", "impact", "status"

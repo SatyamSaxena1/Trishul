@@ -2,6 +2,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from pathlib import PurePosixPath
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -274,9 +275,19 @@ class Finding(TenantScopedModel):
         REMEDIATION_PENDING = "remediation_pending", "Remediation pending"
         RESOLVED = "resolved", "Resolved"
 
+    class AnalystDecision(models.TextChoices):
+        ACCEPTED = "accepted", "Accepted"
+        FALSE_POSITIVE = "false_positive", "False positive"
+        DUPLICATE = "duplicate", "Duplicate"
+        NEEDS_CONTEXT = "needs_context", "Needs context"
+
     scan = models.ForeignKey(Scan, on_delete=models.PROTECT)
+    repository_version = models.ForeignKey(RepositoryVersion, on_delete=models.PROTECT)
     rule_id = models.CharField(max_length=160)
     rule_version = models.CharField(max_length=40)
+    analyzer_name = models.CharField(max_length=160)
+    analyzer_version = models.CharField(max_length=80)
+    analyzer_image_digest = models.CharField(max_length=160, blank=True)
     language = models.CharField(max_length=60)
     framework = models.CharField(max_length=100, blank=True)
     title = models.CharField(max_length=300)
@@ -289,15 +300,51 @@ class Finding(TenantScopedModel):
     validation_notes = models.TextField(blank=True, max_length=8000)
     remediation = models.TextField(blank=True, max_length=8000)
     fingerprint = models.CharField(max_length=64)
+    file_path = models.CharField(max_length=600)
+    start_line = models.PositiveIntegerField()
+    end_line = models.PositiveIntegerField()
+    evidence = models.JSONField()
+    analyst_decision = models.CharField(
+        max_length=30, choices=AnalystDecision.choices, default=AnalystDecision.NEEDS_CONTEXT
+    )
+    decision_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["tenant", "scan", "fingerprint"], name="finding_scan_fingerprint_uniq")
         ]
 
+    def clean(self):
+        super().clean()
+        if self.scan_id and self.repository_version_id != self.scan.repository_version_id:
+            raise ValidationError({"repository_version": "Must identify the immutable version used by the scan."})
+        path = PurePosixPath(self.file_path)
+        if not self.file_path or path.is_absolute() or ".." in path.parts or "\\" in self.file_path:
+            raise ValidationError({"file_path": "Use a normalized relative POSIX path."})
+        normalized = path.as_posix()
+        if normalized != self.file_path or normalized in {"", "."}:
+            raise ValidationError({"file_path": "Use a normalized relative POSIX path."})
+        if self.start_line < 1 or self.end_line < self.start_line:
+            raise ValidationError({"end_line": "Line ranges must be positive and end at or after start_line."})
+        if not isinstance(self.evidence, dict) or not self.evidence:
+            raise ValidationError({"evidence": "Structured evidence is required to reproduce the match."})
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            original = Finding.all_objects.filter(pk=self.pk).values(
+                "tenant_id", "scan_id", "repository_version_id", "rule_id", "rule_version",
+                "analyzer_name", "analyzer_version", "analyzer_image_digest", "file_path",
+                "start_line", "end_line", "evidence", "fingerprint", "created_at",
+            ).first()
+            if original:
+                for field, value in original.items():
+                    if getattr(self, field) != value:
+                        raise ValidationError({field: "Finding provenance is immutable."})
+        return super().save(*args, **kwargs)
+
 
 class FindingEvidence(TenantScopedModel):
-    finding = models.ForeignKey(Finding, on_delete=models.PROTECT, related_name="evidence")
+    finding = models.ForeignKey(Finding, on_delete=models.PROTECT, related_name="evidence_records")
     file_path = models.CharField(max_length=600)
     start_line = models.PositiveIntegerField()
     end_line = models.PositiveIntegerField()

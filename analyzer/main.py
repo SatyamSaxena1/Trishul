@@ -15,6 +15,8 @@ except ImportError:  # Local regression tests import the application copy.
 
 PACK = "python-stdlib"
 VERSION = "1.0"
+ANALYZER_NAME = "trishul-python-ast"
+ANALYZER_VERSION = "1.0"
 
 RULES = {
     "PY001": {
@@ -58,13 +60,16 @@ def call_name(node):
     return ""
 
 
-def finding(rule_id, path, node, source_lines):
+def finding(rule_id, path, node, source_lines, match):
     rule = RULES[rule_id]
     line = source_lines[node.lineno - 1].strip().encode()
     fingerprint = hashlib.sha256(f"{rule_id}:{path}:{node.lineno}:{node.col_offset}".encode()).hexdigest()
     return {
         "rule_id": rule_id,
         "rule_version": VERSION,
+        "analyzer_name": ANALYZER_NAME,
+        "analyzer_version": ANALYZER_VERSION,
+        "analyzer_image_digest": "",
         **rule,
         "status": "needs_validation",
         "fingerprint": fingerprint,
@@ -72,6 +77,11 @@ def finding(rule_id, path, node, source_lines):
         "start_line": node.lineno,
         "end_line": getattr(node, "end_lineno", node.lineno),
         "snippet_hash": hashlib.sha256(line).hexdigest(),
+        "evidence": {
+            "match": match,
+            "snippet_sha256": hashlib.sha256(line).hexdigest(),
+            "ast_node": type(node).__name__,
+        },
     }
 
 
@@ -94,7 +104,7 @@ def scan_python(path, relative):
         if name in {"subprocess.run", "subprocess.call", "subprocess.Popen", "os.system"} and (
             name == "os.system" or isinstance(shell, ast.Constant) and shell.value is True
         ):
-            results.append(finding("PY001", relative, node, lines))
+            results.append(finding("PY001", relative, node, lines, {"call": name, "shell": True}))
         if (
             name.endswith(
                 ("requests.get", "requests.post", "requests.put", "requests.delete", "httpx.get", "httpx.post")
@@ -102,9 +112,11 @@ def scan_python(path, relative):
             and isinstance(verify, ast.Constant)
             and verify.value is False
         ):
-            results.append(finding("PY002", relative, node, lines))
+            results.append(finding("PY002", relative, node, lines, {"call": name, "verify": False}))
         if name.endswith("yaml.load") and loader and call_name(loader).endswith(("UnsafeLoader", "FullLoader")):
-            results.append(finding("PY003", relative, node, lines))
+            results.append(
+                finding("PY003", relative, node, lines, {"call": name, "loader": call_name(loader)})
+            )
     return results, True
 
 
@@ -148,6 +160,7 @@ def main():
     output = {
         "pack": PACK,
         "pack_version": VERSION,
+        "analyzer": {"name": ANALYZER_NAME, "version": ANALYZER_VERSION, "image_digest": ""},
         "coverage": {
             "status": "experimental",
             "analyzed_python_files": analyzed,
