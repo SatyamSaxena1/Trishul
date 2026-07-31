@@ -42,3 +42,7 @@ On Windows, replace `.venv/bin` with `.venv/Scripts`.
 6. Bootstrap the first OIDC subject with `sh bin/trishulctl bootstrap SUBJECT EMAIL TENANT_SLUG "Tenant Name"`.
 
 See [operations](docs/operations.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), and [architecture](docs/architecture.md).
+
+Approved pilots additionally follow the [private execution ledger and controlled
+release process](docs/pilot-operations.md). Tenant pilot records must never be
+stored in this repository.
