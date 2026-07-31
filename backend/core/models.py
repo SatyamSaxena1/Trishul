@@ -246,6 +246,9 @@ class Job(TenantScopedModel):
     state = models.CharField(max_length=20, choices=State.choices, default=State.QUEUED)
     payload = models.JSONField(default=dict)
     attempts = models.PositiveSmallIntegerField(default=0)
+    recovery_count = models.PositiveSmallIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=80, blank=True)
 

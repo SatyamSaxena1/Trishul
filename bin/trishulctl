@@ -72,6 +72,12 @@ backup() {
     $COMPOSE run --rm -T --no-deps migrate python manage.py export_backup_manifest > "$destination/manifest.json"
     rm -f "$plain"
     (cd "$destination" && sha256sum database.dump.enc manifest.json > SHA256SUMS)
+    if (cd "$destination" && sha256sum -c SHA256SUMS >/dev/null); then
+        printf 'success\n' > "$destination/verification.status"
+    else
+        printf 'failed\n' > "$destination/verification.status"
+        die "backup checksum verification failed"
+    fi
     chmod -R go-rwx "$destination"
     $COMPOSE start api worker scheduler ai-gateway analysis-controller edge
     resume=false
@@ -82,7 +88,12 @@ backup() {
 restore() {
     [ "${3:-}" = "--confirm-restore" ] || die "usage: trishulctl restore BACKUP_DIRECTORY --confirm-restore"
     source_dir="$(CDPATH= cd -- "$2" && pwd)"
-    (cd "$source_dir" && sha256sum -c SHA256SUMS)
+    if (cd "$source_dir" && sha256sum -c SHA256SUMS); then
+        printf 'success\n' > "$source_dir/verification.status"
+    else
+        printf 'failed\n' > "$source_dir/verification.status"
+        die "backup checksum verification failed"
+    fi
     plain="$source_dir/database.restore.dump"
     trap 'rm -f "$plain"' EXIT INT TERM
     $COMPOSE stop edge api worker scheduler ai-gateway analysis-controller

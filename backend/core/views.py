@@ -14,7 +14,7 @@ from django.db import connection, transaction
 from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from rest_framework import exceptions, status, viewsets
 from rest_framework.decorators import action, api_view, authentication_classes, permission_classes
 from rest_framework.permissions import AllowAny
@@ -674,7 +674,11 @@ def metrics(request):
     supplied = request.headers.get("X-Metrics-Token", "")
     if configured and not hmac.compare_digest(hashlib.sha256(supplied.encode()).hexdigest(), expected):
         return Response(status=403)
-    return HttpResponse(generate_latest(), content_type=CONTENT_TYPE_LATEST)
+    from .metrics import TrishulCollector
+
+    registry = CollectorRegistry()
+    registry.register(TrishulCollector())
+    return HttpResponse(generate_latest(registry), content_type=CONTENT_TYPE_LATEST)
 
 
 @api_view(["POST"])
@@ -723,12 +727,28 @@ def ai_invoke(request):
         estimated_input = sum(len(str(item.get("content", ""))) for item in request.data["messages"]) // 4
         if used_today + estimated_input + configuration.max_output_tokens > configuration.daily_token_limit:
             return Response({"error": "daily_token_budget_exceeded"}, status=429)
-        output, metadata = invoke(
-            configuration=configuration,
-            workflow=request.data["workflow"],
-            messages=request.data["messages"],
-            response_schema=request.data["response_schema"],
-        )
+        try:
+            output, metadata = invoke(
+                configuration=configuration,
+                workflow=request.data["workflow"],
+                messages=request.data["messages"],
+                response_schema=request.data["response_schema"],
+            )
+        except Exception as exc:
+            AIAnalysisRun.all_objects.create(
+                tenant_id=tenant_id,
+                model_configuration=configuration,
+                prompt_version=prompt_version,
+                workflow=str(request.data.get("workflow", "unknown"))[:80],
+                state="failed",
+                request_hash=hashlib.sha256(
+                    json.dumps(request.data.get("messages", []), sort_keys=True, default=str).encode()
+                ).hexdigest(),
+                error_code=type(exc).__name__[:80],
+                policy_decisions=["gateway_invocation:failed"],
+            )
+            logger.exception("AI gateway invocation failed")
+            return Response({"error": "ai_gateway_failed"}, status=502)
         run = AIAnalysisRun.all_objects.create(
             tenant_id=tenant_id,
             model_configuration=configuration,

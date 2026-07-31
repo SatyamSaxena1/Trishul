@@ -1,4 +1,5 @@
 import logging
+from datetime import timedelta
 
 from celery import shared_task
 from django.db import connection, transaction
@@ -24,6 +25,14 @@ def execute_scan(tenant_id, scan_id):
         scan = Scan.objects.select_for_update().select_related("repository_version").get(pk=scan_id)
         if scan.state != Scan.State.QUEUED:
             return
+        now = timezone.now()
+        job = Job.objects.select_for_update().get(payload__scan_id=str(scan_id))
+        job.state = Job.State.RUNNING
+        job.attempts += 1
+        job.started_at = now
+        job.lease_expires_at = now + timedelta(minutes=35)
+        job.version += 1
+        job.save(update_fields=["state", "attempts", "started_at", "lease_expires_at", "version", "updated_at"])
         scan.state = Scan.State.RUNNING
         scan.version += 1
         scan.save(update_fields=["state", "version", "updated_at"])
@@ -61,6 +70,9 @@ def execute_scan(tenant_id, scan_id):
             scan.state = Scan.State.COMPLETED
             scan.version += 1
             scan.save(update_fields=["coverage", "state", "version", "updated_at"])
+            Job.objects.filter(payload__scan_id=str(scan_id)).update(
+                state=Job.State.COMPLETED, finished_at=timezone.now(), lease_expires_at=None, error_code=""
+            )
             AuditEvent.append(
                 tenant=scan.tenant,
                 actor_type="system",
@@ -80,7 +92,10 @@ def execute_scan(tenant_id, scan_id):
             _database_tenant(tenant_id)
             Scan.objects.filter(pk=scan_id).update(state=Scan.State.FAILED, version=scan.version + 1)
             Job.objects.filter(payload__scan_id=str(scan_id)).update(
-                state=Job.State.FAILED, error_code=type(exc).__name__[:80]
+                state=Job.State.FAILED,
+                finished_at=timezone.now(),
+                lease_expires_at=None,
+                error_code=type(exc).__name__[:80],
             )
         raise
 
@@ -89,14 +104,34 @@ def execute_scan(tenant_id, scan_id):
 def reconcile_jobs():
     now = timezone.now()
     for tenant_id in Tenant.objects.filter(is_active=True).values_list("id", flat=True).iterator():
+        recovered_scan_ids = []
         with transaction.atomic(), tenant_context(tenant_id):
             _database_tenant(tenant_id)
             stale = Job.objects.filter(state=Job.State.RUNNING, lease_expires_at__lt=now)
             for job in stale.select_for_update():
                 job.state = Job.State.QUEUED if job.attempts < 3 else Job.State.FAILED
                 job.error_code = "lease_expired"
+                job.recovery_count += 1
+                job.finished_at = now if job.state == Job.State.FAILED else None
+                job.lease_expires_at = None
+                scan_id = job.payload.get("scan_id")
+                if job.state == Job.State.QUEUED and scan_id:
+                    Scan.objects.filter(pk=scan_id, state=Scan.State.RUNNING).update(state=Scan.State.QUEUED)
+                    recovered_scan_ids.append(str(scan_id))
                 job.version += 1
-                job.save(update_fields=["state", "error_code", "version", "updated_at"])
+                job.save(
+                    update_fields=[
+                        "state",
+                        "error_code",
+                        "recovery_count",
+                        "finished_at",
+                        "lease_expires_at",
+                        "version",
+                        "updated_at",
+                    ]
+                )
+        for scan_id in recovered_scan_ids:
+            execute_scan.apply_async(args=[str(tenant_id), scan_id], queue="analysis")
 
 
 @shared_task(name="core.tasks.expire_acceptances")
