@@ -248,6 +248,20 @@ class Job(TenantScopedModel):
     attempts = models.PositiveSmallIntegerField(default=0)
     lease_expires_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=80, blank=True)
+    idempotency_key = models.CharField(max_length=64, blank=True)
+    dispatch_pending = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "idempotency_key"],
+                condition=models.Q(
+                    idempotency_key__gt="",
+                    state__in=["queued", "running", "completed"],
+                ),
+                name="job_active_idempotency_uniq",
+            )
+        ]
 
 
 class Scan(TenantScopedModel):
@@ -263,6 +277,8 @@ class Scan(TenantScopedModel):
     language_pack = models.CharField(max_length=100)
     language_pack_version = models.CharField(max_length=40)
     coverage = models.JSONField(default=dict)
+    configuration = models.JSONField(default=dict, blank=True)
+    enabled_rules = models.JSONField(default=list, blank=True)
 
 
 class Finding(TenantScopedModel):
@@ -303,6 +319,14 @@ class FindingEvidence(TenantScopedModel):
     end_line = models.PositiveIntegerField()
     snippet_hash = models.CharField(max_length=64)
     object_key = models.CharField(max_length=600, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "finding", "file_path", "start_line", "end_line"],
+                name="finding_evidence_location_uniq",
+            )
+        ]
 
 
 class ThreatModel(TenantScopedModel):

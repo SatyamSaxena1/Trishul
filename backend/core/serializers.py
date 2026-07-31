@@ -80,8 +80,37 @@ ApplicationSerializer = serializer_for(Application)
 MembershipSerializer = serializer_for(Membership)
 RepositorySerializer = serializer_for(Repository)
 RepositoryVersionSerializer = serializer_for(RepositoryVersion, read_only_fields=("immutable",))
-JobSerializer = serializer_for(Job)
-ScanSerializer = serializer_for(Scan, read_only_fields=("state", "coverage"))
+JobSerializer = serializer_for(Job, read_only_fields=("idempotency_key", "dispatch_pending"))
+class ScanSerializer(TenantModelSerializer):
+    class Meta:
+        model = Scan
+        fields = "__all__"
+        read_only_fields = ("tenant", "version", "created_at", "updated_at", "state", "coverage")
+
+    def validate_configuration(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Must be a JSON object.")
+        return value
+
+    def validate_enabled_rules(self, value):
+        if not isinstance(value, list) or any(not isinstance(rule, str) or not rule for rule in value):
+            raise serializers.ValidationError("Must be a list of non-empty rule identifiers.")
+        return sorted(set(value))
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        immutable = {
+            "repository_version",
+            "language_pack",
+            "language_pack_version",
+            "configuration",
+            "enabled_rules",
+        }
+        if self.instance and immutable.intersection(attrs):
+            raise serializers.ValidationError("Analysis inputs are immutable after submission.")
+        return attrs
+
+
 FindingSerializer = serializer_for(Finding)
 FindingEvidenceSerializer = serializer_for(FindingEvidence)
 ThreatModelSerializer = serializer_for(ThreatModel)
