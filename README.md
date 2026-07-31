@@ -37,7 +37,7 @@ On Windows, replace `.venv/bin` with `.venv/Scripts`.
 1. Copy `.env.example` to `.env` and configure customer endpoints.
 2. Create the files documented in `secrets/README.md` with mode `0600`.
 3. Configure a dedicated rootless Docker or Podman API socket for the analysis controller.
-4. Build or load the signed release images.
+4. For production, load the signed release bundle and configure its independently trusted release public key. For local builds, use only the development override documented in `docs/operations.md`.
 5. Run `sh bin/trishulctl doctor`, then `sh bin/trishulctl install`.
 6. Bootstrap the first OIDC subject with `sh bin/trishulctl bootstrap SUBJECT EMAIL TENANT_SLUG "Tenant Name"`.
 

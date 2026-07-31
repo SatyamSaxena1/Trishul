@@ -1,7 +1,7 @@
 name: ai-trishul
 
 x-app: &app
-  image: ${TRISHUL_IMAGE:-ai-trishul:0.1.0}
+  image: ${TRISHUL_IMAGE:?TRISHUL_IMAGE must be set to a release digest}
   restart: unless-stopped
   read_only: true
   user: "10001:10001"
@@ -51,7 +51,7 @@ x-app: &app
 
 services:
   edge:
-    image: ${TRISHUL_EDGE_IMAGE:-ai-trishul-edge:0.1.0}
+    image: ${TRISHUL_EDGE_IMAGE:?TRISHUL_EDGE_IMAGE must be set to a release digest}
     build:
       context: .
       dockerfile: deploy/edge/Dockerfile
@@ -110,7 +110,7 @@ services:
 
   analysis-controller:
     <<: *app
-    image: ${TRISHUL_CONTROLLER_IMAGE:-ai-trishul-controller:0.1.0}
+    image: ${TRISHUL_CONTROLLER_IMAGE:?TRISHUL_CONTROLLER_IMAGE must be set to a release digest}
     build:
       context: .
       target: controller

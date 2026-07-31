@@ -11,7 +11,7 @@ Production should reserve at least 4 CPU cores, 12 GiB RAM, and 50 GiB local dis
 
 ## Installation
 
-Run `sh bin/trishulctl doctor` before every first installation or host change. It rejects missing configuration, weak secret-file permissions, missing rootless runtime sockets, rootful socket paths, invalid Compose configuration, and inadequate disk.
+Run `sh bin/trishulctl doctor` before every first installation or host change. It rejects missing configuration, weak secret-file permissions, missing rootless runtime sockets, rootful socket paths, invalid Compose configuration, and inadequate disk. Production preflight also requires every application and analyzer image to use an immutable `@sha256:` reference, verifies the release manifest and complete bundle with the configured trusted public key, and requires every configured image to exactly match its service entry in the manifest.
 
 `sh bin/trishulctl install` starts migrations first, waits on dependency health, starts stateless services, and requires application readiness before success.
 
@@ -35,7 +35,11 @@ Restore verifies checksums and authenticated encryption, restores PostgreSQL, ap
 
 ## Offline release
 
-`RELEASE_SIGNING_KEY=/secure/key.pem sh bin/trishulctl bundle` saves every required OCI image, Compose/configuration files, operational tooling, documentation, SHA-256 checksums, a signature, and the release public key. Verify the signature and checksums before loading images in the restricted environment.
+`RELEASE_SIGNING_KEY=/secure/key.pem sh bin/trishulctl bundle` refuses mutable or missing image references, saves every required OCI image, and creates `release-manifest.tsv`, its detached signature, bundle checksums, and a detached checksum signature. The manifest maps every Compose service plus the separately launched analyzer to an immutable image digest. Distribute the public-key fingerprint over a separate trusted channel; do not establish trust merely by accepting the key shipped inside the bundle. Set `RELEASE_PUBLIC_KEY` to the independently trusted key and keep `RELEASE_BUNDLE_DIR`, `RELEASE_MANIFEST`, and `RELEASE_MANIFEST_SIGNATURE` pointed at the verified bundle when running `doctor` or `install`.
+
+## Controlled local-development override
+
+Local source builds may intentionally use mutable names. Set `TRISHUL_DEVELOPMENT_ALLOW_MUTABLE_IMAGES=true` only in a developer-owned `.env`, then use `docker compose build` or `sh bin/trishulctl up`. This explicit switch skips release and bundle verification and prints a warning. It must never be set on a production host, in a release bundle, or in deployment automation; omission retains the fail-closed production default.
 
 ## Observability
 

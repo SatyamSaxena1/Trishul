@@ -8,11 +8,70 @@ die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
+absolute_path() {
+    case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s/%s\n' "$ROOT" "$1" ;; esac
+}
+
+is_digest_image() {
+    printf '%s\n' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$' &&
+        ! printf '%s\n' "$1" | grep -Eq 'sha256:(0{64}|replace-)'
+}
+
+manifest_image() {
+    awk -F '\t' -v service="$1" '$1 == service { count++; image=$2 } END { if (count == 1) print image; else exit 1 }' "$RELEASE_MANIFEST_PATH"
+}
+
+verify_release() {
+    need openssl; need sha256sum
+    RELEASE_MANIFEST_PATH="$(absolute_path "${RELEASE_MANIFEST:-release-manifest.tsv}")"
+    release_signature="$(absolute_path "${RELEASE_MANIFEST_SIGNATURE:-release-manifest.tsv.sig}")"
+    release_key="$(absolute_path "${RELEASE_PUBLIC_KEY:-release-public-key.pem}")"
+    [ -s "$RELEASE_MANIFEST_PATH" ] || die "missing release manifest: $RELEASE_MANIFEST_PATH"
+    [ -s "$release_signature" ] || die "missing release manifest signature: $release_signature"
+    [ -s "$release_key" ] || die "missing trusted release public key: $release_key"
+    openssl dgst -sha256 -verify "$release_key" -signature "$release_signature" "$RELEASE_MANIFEST_PATH" >/dev/null 2>&1 ||
+        die "release manifest signature verification failed"
+
+    expected_services="edge api worker scheduler ai-gateway analysis-controller migrate postgres redis analyzer"
+    for service in $expected_services; do
+        image="$(manifest_image "$service")" || die "release manifest has a missing or duplicate $service image"
+        is_digest_image "$image" || die "release manifest image for $service is not pinned by sha256 digest"
+        case "$service" in
+            edge) configured="$TRISHUL_EDGE_IMAGE" ;;
+            analysis-controller) configured="$TRISHUL_CONTROLLER_IMAGE" ;;
+            analyzer) configured="${TRISHUL_ANALYZER_IMAGE:-}" ;;
+            postgres) configured='postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94' ;;
+            redis) configured='redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd' ;;
+            *) configured="$TRISHUL_IMAGE" ;;
+        esac
+        [ "$configured" = "$image" ] || die "$service image disagrees with the signed release manifest"
+    done
+    entries="$(awk -F '\t' 'NF { n++ } END { print n+0 }' "$RELEASE_MANIFEST_PATH")"
+    [ "$entries" -eq 10 ] || die "release manifest contains unexpected or incomplete service entries"
+
+    bundle_dir="$(absolute_path "${RELEASE_BUNDLE_DIR:-.}")"
+    [ -s "$bundle_dir/SHA256SUMS" ] || die "release bundle is incomplete: missing SHA256SUMS"
+    [ -s "$bundle_dir/SHA256SUMS.sig" ] || die "release bundle is unverified: missing SHA256SUMS.sig"
+    openssl dgst -sha256 -verify "$release_key" -signature "$bundle_dir/SHA256SUMS.sig" "$bundle_dir/SHA256SUMS" >/dev/null 2>&1 ||
+        die "release bundle signature verification failed"
+    (cd "$bundle_dir" && sha256sum -c SHA256SUMS >/dev/null) || die "release bundle is incomplete or has been modified"
+}
+
 doctor() {
     need docker
     docker compose version >/dev/null
     [ -f "$ROOT/.env" ] || die "copy .env.example to .env and configure it"
     set -a; . "$ROOT/.env"; set +a
+    if [ "${TRISHUL_DEVELOPMENT_ALLOW_MUTABLE_IMAGES:-false}" = true ]; then
+        info "WARNING: development image override enabled; release verification skipped"
+    else
+        for variable in TRISHUL_IMAGE TRISHUL_EDGE_IMAGE TRISHUL_CONTROLLER_IMAGE TRISHUL_ANALYZER_IMAGE; do
+            eval "image=\${$variable:-}"
+            [ -n "$image" ] || die "$variable is required"
+            is_digest_image "$image" || die "$variable must be an OCI image pinned by sha256 digest"
+        done
+        verify_release
+    fi
     [ -n "${TRISHUL_HOSTNAME:-}" ] || die "TRISHUL_HOSTNAME is required"
     [ -n "${ROOTLESS_OCI_SOCKET:-}" ] || die "ROOTLESS_OCI_SOCKET is required"
     case "$ROOTLESS_OCI_SOCKET" in
@@ -110,15 +169,38 @@ bundle() {
     need sha256sum; need openssl
     [ -n "${RELEASE_SIGNING_KEY:-}" ] || die "RELEASE_SIGNING_KEY must name an Ed25519 or RSA private key"
     set -a; . "$ROOT/.env"; set +a
+    for variable in TRISHUL_IMAGE TRISHUL_EDGE_IMAGE TRISHUL_CONTROLLER_IMAGE TRISHUL_ANALYZER_IMAGE; do
+        eval "image=\${$variable:-}"
+        [ -n "$image" ] || die "$variable is required"
+        is_digest_image "$image" || die "$variable must be an OCI image pinned by sha256 digest"
+    done
     destination="${2:-$ROOT/release/ai-trishul-offline}"
+    rm -rf "$destination"
     mkdir -p "$destination/images"
     images="${TRISHUL_IMAGE} ${TRISHUL_EDGE_IMAGE} ${TRISHUL_CONTROLLER_IMAGE} ${TRISHUL_ANALYZER_IMAGE} postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94 redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd"
     docker save $images -o "$destination/images/images.tar"
-    cp "$ROOT/compose.yaml" "$ROOT/.env.example" "$destination/"
+    cp "$ROOT/compose.yaml" "$destination/"
+    sed \
+        -e "s|^TRISHUL_IMAGE=.*|TRISHUL_IMAGE=$TRISHUL_IMAGE|" \
+        -e "s|^TRISHUL_EDGE_IMAGE=.*|TRISHUL_EDGE_IMAGE=$TRISHUL_EDGE_IMAGE|" \
+        -e "s|^TRISHUL_CONTROLLER_IMAGE=.*|TRISHUL_CONTROLLER_IMAGE=$TRISHUL_CONTROLLER_IMAGE|" \
+        -e "s|^TRISHUL_ANALYZER_IMAGE=.*|TRISHUL_ANALYZER_IMAGE=$TRISHUL_ANALYZER_IMAGE|" \
+        "$ROOT/.env.example" > "$destination/.env.example"
     cp -R "$ROOT/bin" "$ROOT/deploy" "$ROOT/docs" "$destination/"
+    openssl pkey -in "$RELEASE_SIGNING_KEY" -pubout -out "$destination/release-public-key.pem"
+    manifest="$destination/release-manifest.tsv"
+    {
+        printf 'edge\t%s\n' "$TRISHUL_EDGE_IMAGE"
+        for service in api worker scheduler ai-gateway; do printf '%s\t%s\n' "$service" "$TRISHUL_IMAGE"; done
+        printf 'analysis-controller\t%s\n' "$TRISHUL_CONTROLLER_IMAGE"
+        printf 'migrate\t%s\n' "$TRISHUL_IMAGE"
+        printf 'postgres\t%s\n' 'postgres:17.6-alpine@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94'
+        printf 'redis\t%s\n' 'redis:8.2-alpine@sha256:223b183cbc49f5ff48728e1fc52ccf101f05072decad2bd9867281a3c9bf75fd'
+        printf 'analyzer\t%s\n' "$TRISHUL_ANALYZER_IMAGE"
+    } > "$manifest"
+    openssl dgst -sha256 -sign "$RELEASE_SIGNING_KEY" -out "$manifest.sig" "$manifest"
     (cd "$destination" && find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.sig -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
     openssl dgst -sha256 -sign "$RELEASE_SIGNING_KEY" -out "$destination/SHA256SUMS.sig" "$destination/SHA256SUMS"
-    openssl pkey -in "$RELEASE_SIGNING_KEY" -pubout -out "$destination/release-public-key.pem"
     info "Offline bundle created: $destination"
 }
 
