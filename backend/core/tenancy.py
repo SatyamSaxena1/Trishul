@@ -10,7 +10,7 @@ def current_tenant_id() -> UUID | None:
 
 
 def set_current_tenant(tenant_id: UUID | None):
-    return _tenant_id.set(tenant_id)
+    return _tenant_id.set(UUID(str(tenant_id)) if tenant_id is not None else None)
 
 
 def reset_current_tenant(token) -> None:
