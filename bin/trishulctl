@@ -9,26 +9,8 @@ info() { printf '%s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
 doctor() {
-    need docker
-    docker compose version >/dev/null
-    [ -f "$ROOT/.env" ] || die "copy .env.example to .env and configure it"
-    set -a; . "$ROOT/.env"; set +a
-    [ -n "${TRISHUL_HOSTNAME:-}" ] || die "TRISHUL_HOSTNAME is required"
-    [ -n "${ROOTLESS_OCI_SOCKET:-}" ] || die "ROOTLESS_OCI_SOCKET is required"
-    case "$ROOTLESS_OCI_SOCKET" in
-        /var/run/docker.sock|/run/docker.sock) die "rootful Docker sockets are unsupported" ;;
-    esac
-    [ -S "$ROOTLESS_OCI_SOCKET" ] || die "rootless OCI socket does not exist: $ROOTLESS_OCI_SOCKET"
-    for file in db_owner_password db_app_password redis_password s3_access_key s3_secret_key django_secret_key internal_ai_token metrics_token ai_endpoint_credential backup_key tls.crt tls.key; do
-        path="$ROOT/secrets/$file"
-        [ -s "$path" ] || die "missing secret: secrets/$file"
-        mode="$(stat -c '%a' "$path")"
-        [ "$mode" -le 600 ] || die "secrets/$file must have mode 0600 or stricter"
-    done
-    $COMPOSE config --quiet
-    available_kb="$(df -Pk "$ROOT" | awk 'NR==2 {print $4}')"
-    [ "$available_kb" -ge 10485760 ] || die "at least 10 GiB free disk is required"
-    info "AI Trishul deployment prerequisites passed"
+    need python3
+    exec python3 "$ROOT/bin/trishul-doctor.py" "$ROOT"
 }
 
 wait_ready() {

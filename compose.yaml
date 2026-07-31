@@ -107,6 +107,8 @@ services:
     environment:
       <<: *app-environment
       AI_ENDPOINT_ALLOWLIST: ${AI_ENDPOINT_ALLOWLIST}
+      AI_ENDPOINT_URL: ${AI_ENDPOINT_URL:-}
+      AI_CA_BUNDLE: ${AI_CA_BUNDLE:-}
 
   analysis-controller:
     <<: *app
