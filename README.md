@@ -10,7 +10,7 @@ AI Trishul is a customer-hosted security intelligence MVP connecting evidence-ba
 - Immutable evidence/version models and a hash-chained, database-protected audit ledger.
 - Safe ZIP/TAR inventory with traversal, link, file-count, file-size, and expansion limits.
 - Disposable rootless OCI analyzer jobs with no network, read-only root, quotas, and signed image pinning in production.
-- Experimental Python language pack using deterministic AST rules; model output cannot confirm findings.
+- Limited-pilot Python language pack using deterministic AST rules; its explicit coverage remains experimental, and model output cannot confirm findings.
 - Structured STRIDE threat generation requiring human-verified components and flows.
 - Evidence-required assessment conclusions and independent risk-acceptance approval.
 - Deterministic, versioned risk scoring with retained inputs.
@@ -19,7 +19,7 @@ AI Trishul is a customer-hosted security intelligence MVP connecting evidence-ba
 - Docker Compose deployment, encrypted backup/restore, offline release bundling, health checks, metrics, and upgrade tooling.
 - Kubernetes/OpenShift enterprise profile with Kustomize, restricted pod security, network policy, autoscaling, disruption budgets, external secrets, and Kubernetes-native isolated analysis jobs.
 
-The Python language pack is intentionally marked `experimental` until representative first-customer repositories establish its precision, recall, framework coverage, and maintenance acceptance.
+The Python language pack is intentionally marked `experimental` until representative first-customer repositories establish its precision, recall, framework coverage, and maintenance acceptance. Its only pilot commitment is the narrow surface in the [Python analyzer pilot support matrix](docs/analyzer-support-matrix.md); all other syntax, frameworks, versions, constructs, and rules are unsupported or experimental. Analysts must follow the linked [code-review workflow](docs/analyst-workflow.md) and must not interpret an empty result as assurance.
 
 ## Development
 
