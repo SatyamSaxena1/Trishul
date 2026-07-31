@@ -17,5 +17,7 @@ secrets/*
 !secrets/README.md
 backups/*
 !backups/.gitkeep
+pilot-ledger/
+release/pilot-candidates/
 *.log
 .DS_Store

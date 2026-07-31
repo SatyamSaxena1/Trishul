@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:trishul:pilot-ledger:v1",
+  "title": "Private tenant pilot execution ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "tenant_id", "repository_id", "approved_at", "executions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "tenant_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{3,100}$"},
+    "repository_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{3,100}$"},
+    "approved_at": {"type": "string", "format": "date-time"},
+    "executions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/execution"}
+    }
+  },
+  "$defs": {
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["execution_id", "repository_version", "submitted_at", "completed_at", "outcome", "runtime_ms", "events", "versions", "findings_by_rule", "review", "incident_refs"],
+      "properties": {
+        "execution_id": {"type": "string", "minLength": 1},
+        "repository_version": {"type": "string", "minLength": 7},
+        "submitted_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "outcome": {"enum": ["completed", "failed", "cancelled", "timed_out"]},
+        "runtime_ms": {"type": "integer", "minimum": 0},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+        "versions": {
+          "type": "object", "additionalProperties": false,
+          "required": ["release", "analyzer", "rule_pack"],
+          "properties": {"release": {"type": "string", "minLength": 1}, "analyzer": {"type": "string", "minLength": 1}, "rule_pack": {"type": "string", "minLength": 1}}
+        },
+        "findings_by_rule": {"type": "array", "items": {"$ref": "#/$defs/ruleFinding"}},
+        "review": {"$ref": "#/$defs/review"},
+        "incident_refs": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z0-9_-]+$"}, "uniqueItems": true}
+      }
+    },
+    "event": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "occurred_at", "actor", "reason"],
+      "properties": {"type": {"enum": ["retry", "manual_recovery"]}, "occurred_at": {"type": "string", "format": "date-time"}, "actor": {"type": "string", "minLength": 1}, "reason": {"type": "string", "minLength": 1}}
+    },
+    "ruleFinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["rule_id", "rule_version", "count"],
+      "properties": {"rule_id": {"type": "string", "minLength": 1}, "rule_version": {"type": "string", "minLength": 1}, "count": {"type": "integer", "minimum": 0}}
+    },
+    "review": {
+      "type": "object", "additionalProperties": false,
+      "required": ["completed", "reviewer", "completed_at"],
+      "properties": {"completed": {"const": true}, "reviewer": {"type": "string", "minLength": 1}, "completed_at": {"type": "string", "format": "date-time"}}
+    }
+  }
+}

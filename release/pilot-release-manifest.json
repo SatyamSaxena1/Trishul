@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "release_version": "0.1.0-pilot.1",
+  "analyzer_version": "0.1.0-pilot.1",
+  "source_commit": "SET_AT_RELEASE_CUT",
+  "repairs": [],
+  "approvals": {
+    "engineering": "PENDING",
+    "security": "PENDING",
+    "pilot_operations": "PENDING"
+  },
+  "rollback": {
+    "last_known_good_release": "NONE_INITIAL_PILOT",
+    "conditions": [
+      "tenant-isolation check fails",
+      "acceptance regression fails in staging",
+      "job terminal-failure rate exceeds the approved pilot threshold"
+    ],
+    "procedure": "Stop new submissions, preserve execution evidence, restore the last compatible signed release when one exists, run tenant-isolation and readiness checks, and record recovery events and incident references in the private ledger.",
+    "schema_compatibility": "No rollback across a destructive migration; restore the pre-release backup when schema compatibility is not demonstrated."
+  }
+}
