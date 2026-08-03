@@ -11,7 +11,10 @@ type Context = {
   permissions: string[];
 };
 type Application = RecordBase & { name: string; description: string; criticality: number; internet_exposed: boolean };
-type Finding = RecordBase & { title: string; severity: number; confidence: number; status: string; cwe: string };
+type FindingDecision = "accepted" | "false_positive" | "duplicate" | "needs_context";
+type FindingReview = { id: string; decision: FindingDecision; reason_codes: string[]; reviewer_comment: string; reviewed_at: string };
+type Finding = RecordBase & { title: string; severity: number; confidence: number; status: string; cwe: string; analyst_decision: FindingReview | null };
+type Usefulness = { accepted: number; false_positive: number; duplicate: number; needs_context: number; conclusive_decisions: number; usefulness: number | null };
 type Threat = RecordBase & { stride_category: string; scenario: string; likelihood: number; impact: number; status: string };
 type Assessment = RecordBase & { name: string; status: string };
 type Risk = RecordBase & { title: string; state: string };
@@ -83,6 +86,39 @@ function AppWizard({ api, onCreated }: { api: Api; onCreated: () => void }) {
   );
 }
 
+const REVIEW_REASONS = [
+  "confirmed_exploitable", "defense_in_depth", "test_or_nonproduction_code", "sanitized_or_unreachable",
+  "scanner_misclassification", "same_root_cause", "insufficient_evidence", "owner_input_required",
+];
+
+function FindingReviewForm({ api, finding, onReviewed }: { api: Api; finding: Finding; onReviewed: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true); setError("");
+    const values = new FormData(event.currentTarget);
+    try {
+      await api.create("finding-reviews/", {
+        finding: finding.id,
+        decision: values.get("decision"),
+        reason_codes: values.get("reason_code") ? [values.get("reason_code")] : [],
+        reviewer_comment: values.get("reviewer_comment"),
+      });
+      onReviewed();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Review could not be recorded.");
+    } finally { setBusy(false); }
+  }
+  return <form className="review-form" onSubmit={submit}>
+    <label>Analyst decision<select name="decision" required defaultValue=""><option value="" disabled>Select decision</option><option value="accepted">Accepted</option><option value="false_positive">False positive</option><option value="duplicate">Duplicate</option><option value="needs_context">Needs context</option></select></label>
+    <label>Reason code (optional)<select name="reason_code" defaultValue=""><option value="">None</option>{REVIEW_REASONS.map((reason) => <option key={reason} value={reason}>{reason.replaceAll("_", " ")}</option>)}</select></label>
+    <label>Reviewer comment (optional)<textarea name="reviewer_comment" maxLength={2000} /></label>
+    {error && <span className="inline-error" role="alert">{error}</span>}
+    <button disabled={busy}>{busy ? "Saving…" : "Record decision"}</button>
+  </form>;
+}
+
 function Dashboard({ user }: { user: User }) {
   const [tenantId, setTenantId] = useState(localStorage.getItem("trishul.tenant") ?? "");
   const [context, setContext] = useState<Context | null>(null);
@@ -93,18 +129,20 @@ function Dashboard({ user }: { user: User }) {
   const [threats, setThreats] = useState<Page<Threat>>(EMPTY_PAGE);
   const [assessments, setAssessments] = useState<Page<Assessment>>(EMPTY_PAGE);
   const [risks, setRisks] = useState<Page<Risk>>(EMPTY_PAGE);
+  const [usefulness, setUsefulness] = useState<Usefulness | null>(null);
   const api = useMemo(() => new Api(user, tenantId), [user, tenantId]);
 
   useEffect(() => {
     let active = true;
     async function load() {
       try {
-        const [nextContext, appPage, findingPage, threatPage, assessmentPage, riskPage] = await Promise.all([
+        const [nextContext, appPage, findingPage, threatPage, assessmentPage, riskPage, usefulnessResult] = await Promise.all([
           api.request<Context>("context"), api.list<Application>("applications/"), api.list<Finding>("findings/"),
           api.list<Threat>("threats/"), api.list<Assessment>("assessments/"), api.list<Risk>("risks/"),
+          api.request<Usefulness>("findings/pilot-usefulness/"),
         ]);
         if (!active) return;
-        setContext(nextContext); setApplications(appPage); setFindings(findingPage); setThreats(threatPage); setAssessments(assessmentPage); setRisks(riskPage); setError("");
+        setContext(nextContext); setApplications(appPage); setFindings(findingPage); setThreats(threatPage); setAssessments(assessmentPage); setRisks(riskPage); setUsefulness(usefulnessResult); setError("");
         if (!tenantId) { setTenantId(nextContext.tenant.id); localStorage.setItem("trishul.tenant", nextContext.tenant.id); }
       } catch (reason) {
         if (active) setError(reason instanceof ApiError ? reason.message : "Unable to load security intelligence.");
@@ -138,7 +176,7 @@ function Dashboard({ user }: { user: User }) {
         </section>
         <section className="panel" id="applications"><div className="section-title"><div><p className="eyebrow">PORTFOLIO</p><h2>Applications</h2></div><AppWizard api={api} onCreated={() => setRefresh((value) => value + 1)} /></div><table><thead><tr><th>Name</th><th>Criticality</th><th>Exposure</th></tr></thead><tbody>{applications.results.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.description}</small></td><td>{severityLabel(item.criticality)}</td><td>{item.internet_exposed ? "Internet" : "Internal"}</td></tr>)}</tbody></table>{!applications.results.length && <p className="empty">No applications registered.</p>}</section>
         <div className="two-column">
-          <section className="panel" id="findings"><p className="eyebrow">CODE REVIEW</p><h2>Findings</h2>{findings.results.map((item) => <article className="item" key={item.id}><div><strong>{item.title}</strong><small>{item.cwe || "Unmapped"} · {item.status.replaceAll("_", " ")}</small></div><span className={`severity severity-${item.severity}`}>{severityLabel(item.severity)}</span></article>)}{!findings.results.length && <p className="empty">No evidence-backed findings.</p>}</section>
+          <section className="panel" id="findings"><p className="eyebrow">CODE REVIEW</p><h2>Findings</h2><div className="usefulness"><strong>{usefulness?.usefulness == null ? "—" : `${Math.round(usefulness.usefulness * 100)}%`}</strong><span>Pilot usefulness · accepted / conclusive</span><small>{usefulness?.accepted ?? 0} accepted · {usefulness?.false_positive ?? 0} false positive · {usefulness?.duplicate ?? 0} duplicate · {usefulness?.needs_context ?? 0} needs context</small></div>{findings.results.map((item) => <article className="finding-card" key={item.id}><div className="item"><div><strong>{item.title}</strong><small>{item.cwe || "Unmapped"} · analyst decision: {item.analyst_decision?.decision.replaceAll("_", " ") ?? "not reviewed"}</small></div><span className={`severity severity-${item.severity}`}>{severityLabel(item.severity)}</span></div>{context?.permissions.includes("finding.triage") && <FindingReviewForm api={api} finding={item} onReviewed={() => setRefresh((value) => value + 1)} />}</article>)}{!findings.results.length && <p className="empty">No evidence-backed findings.</p>}</section>
           <section className="panel" id="threats"><p className="eyebrow">ARCHITECTURE</p><h2>Threats</h2>{threats.results.map((item) => <article className="item" key={item.id}><div><strong>{item.stride_category}</strong><small>{item.scenario}</small></div><span>{item.status}</span></article>)}{!threats.results.length && <p className="empty">No reviewed threats.</p>}</section>
           <section className="panel" id="assessments"><p className="eyebrow">ASSURANCE</p><h2>Assessments</h2>{assessments.results.map((item) => <article className="item" key={item.id}><strong>{item.name}</strong><span>{item.status}</span></article>)}{!assessments.results.length && <p className="empty">No assessments started.</p>}</section>
           <section className="panel" id="risks"><p className="eyebrow">PRIORITY</p><h2>Risk intelligence</h2>{risks.results.map((item) => <article className="item" key={item.id}><strong>{item.title}</strong><span>{item.state}</span></article>)}{!risks.results.length && <p className="empty">No correlated risks.</p>}</section>
@@ -155,4 +193,3 @@ export default function App() {
   if (user === undefined) return <main className="loading">Loading secure workspace…</main>;
   return user ? <Dashboard user={user} /> : <Login error={error} />;
 }
-

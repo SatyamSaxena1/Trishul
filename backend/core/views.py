@@ -36,6 +36,7 @@ from .models import (
     Evidence,
     Finding,
     FindingEvidence,
+    FindingReview,
     FrameworkVersion,
     Job,
     Membership,
@@ -89,6 +90,7 @@ PERMISSION_PREFIX = {
     Scan: "scan",
     Finding: "finding",
     FindingEvidence: "evidence",
+    FindingReview: "finding",
     ThreatModel: "threat_model",
     ArchitectureComponent: "threat_model",
     DataFlow: "threat_model",
@@ -122,6 +124,7 @@ APPLICATION_PATH = {
     Scan: "repository_version__repository__application_id",
     Finding: "scan__repository_version__repository__application_id",
     FindingEvidence: "finding__scan__repository_version__repository__application_id",
+    FindingReview: "finding__scan__repository_version__repository__application_id",
     ThreatModel: "application_id",
     ArchitectureComponent: "threat_model__application_id",
     DataFlow: "threat_model__application_id",
@@ -367,6 +370,77 @@ class ScanViewSet(viewset_for(Scan)):
         )
 
 
+class FindingViewSet(viewset_for(Finding)):
+    @action(detail=False, methods=["get"], url_path="pilot-usefulness")
+    def pilot_usefulness(self, request):
+        reviews = FindingReview.objects.all()
+        restrictions = application_restrictions(request)
+        if restrictions:
+            reviews = reviews.filter(finding__scan__repository_version__repository__application_id__in=restrictions)
+        # A finding contributes only its latest human decision to pilot metrics.
+        latest = {}
+        for review in reviews.order_by("finding_id", "reviewed_at", "id"):
+            latest[review.finding_id] = review.decision
+        counts = {decision: 0 for decision, _ in FindingReview.Decision.choices}
+        for decision in latest.values():
+            counts[decision] += 1
+        conclusive = counts[FindingReview.Decision.ACCEPTED] + counts[FindingReview.Decision.FALSE_POSITIVE]
+        return Response(
+            {
+                "accepted": counts[FindingReview.Decision.ACCEPTED],
+                "false_positive": counts[FindingReview.Decision.FALSE_POSITIVE],
+                "duplicate": counts[FindingReview.Decision.DUPLICATE],
+                "needs_context": counts[FindingReview.Decision.NEEDS_CONTEXT],
+                "conclusive_decisions": conclusive,
+                "usefulness": counts[FindingReview.Decision.ACCEPTED] / conclusive if conclusive else None,
+                "definition": "accepted / (accepted + false_positive)",
+            }
+        )
+
+
+class FindingReviewViewSet(viewset_for(FindingReview, immutable=True)):
+    http_method_names = ["get", "post", "head", "options"]
+
+    def perform_create(self, serializer):
+        if isinstance(self.request.user, ServicePrincipal):
+            raise exceptions.PermissionDenied("Only a human reviewer may set the analyst decision.")
+        finding = serializer.validated_data["finding"]
+        repository_version = finding.scan.repository_version
+        provenance = {
+            "finding_id": str(finding.id),
+            "finding_created_at": finding.created_at.isoformat(),
+            "rule_id": finding.rule_id,
+            "rule_version": finding.rule_version,
+            "fingerprint": finding.fingerprint,
+            "scan_id": str(finding.scan_id),
+            "repository_version_id": str(repository_version.id),
+            "repository_sha256": repository_version.sha256,
+        }
+        review = serializer.save(
+            tenant=self.request.tenant,
+            reviewer=self.request.user,
+            reviewed_at=timezone.now(),
+            finding_provenance=provenance,
+        )
+        actor_type, actor_id = actor(self.request)
+        AuditEvent.append(
+            tenant=self.request.tenant,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            action="finding.reviewed",
+            resource_type="core.finding",
+            resource_id=finding.id,
+            details={
+                "review_id": str(review.id),
+                "decision": review.decision,
+                "reason_codes": review.reason_codes,
+                "reviewer_id": str(review.reviewer_id),
+                "reviewed_at": review.reviewed_at.isoformat(),
+                "finding_provenance": provenance,
+            },
+        )
+
+
 class ThreatModelViewSet(viewset_for(ThreatModel)):
     @action(detail=True, methods=["post"])
     def generate(self, request, pk=None):
@@ -464,9 +538,27 @@ class ReportViewSet(viewset_for(Report, immutable=True)):
             raise exceptions.ValidationError({"report_type": "Use technical or executive."})
         findings = list(
             Finding.objects.filter(scan__repository_version__repository__application=application).values(
-                "id", "title", "severity", "confidence", "status", "cwe"
+                "id", "created_at", "scan_id", "rule_id", "rule_version", "fingerprint", "title", "severity",
+                "confidence", "status", "cwe"
             )
         )
+        finding_ids = [finding["id"] for finding in findings]
+        reviews_by_finding = {finding_id: [] for finding_id in finding_ids}
+        for review in FindingReview.objects.filter(finding_id__in=finding_ids).select_related("reviewer"):
+            reviews_by_finding[review.finding_id].append(
+                {
+                    "id": str(review.id),
+                    "decision": review.decision,
+                    "reason_codes": review.reason_codes,
+                    "reviewer_comment": review.reviewer_comment,
+                    "reviewer": {"id": str(review.reviewer_id), "username": review.reviewer.get_username()},
+                    "reviewed_at": review.reviewed_at.isoformat(),
+                    "finding_provenance": review.finding_provenance,
+                }
+            )
+        for finding in findings:
+            finding["decision_history"] = reviews_by_finding[finding["id"]]
+            finding["analyst_decision"] = finding["decision_history"][-1] if finding["decision_history"] else None
         threats = list(
             Threat.objects.filter(threat_model__application=application).values(
                 "id", "stride_category", "scenario", "likelihood", "impact", "status"
@@ -535,7 +627,8 @@ MODEL_VIEWSETS = {
     "repository-versions": viewset_for(RepositoryVersion, immutable=True),
     "jobs": viewset_for(Job),
     "scans": ScanViewSet,
-    "findings": viewset_for(Finding),
+    "findings": FindingViewSet,
+    "finding-reviews": FindingReviewViewSet,
     "finding-evidence": viewset_for(FindingEvidence, immutable=True),
     "threat-models": ThreatModelViewSet,
     "architecture-components": viewset_for(ArchitectureComponent),
