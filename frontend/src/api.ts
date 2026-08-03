@@ -39,5 +39,8 @@ export class Api {
   create<T>(path: string, body: unknown) {
     return this.request<T>(path, { method: "POST", body: JSON.stringify(body) });
   }
-}
 
+  update<T>(path: string, body: unknown, version: number) {
+    return this.request<T>(path, { method: "PATCH", headers: { "If-Match": String(version) }, body: JSON.stringify(body) });
+  }
+}

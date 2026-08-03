@@ -15,6 +15,7 @@ from .models import (
     Evidence,
     Finding,
     FindingEvidence,
+    FindingReview,
     FrameworkVersion,
     Job,
     Membership,
@@ -82,7 +83,33 @@ RepositorySerializer = serializer_for(Repository)
 RepositoryVersionSerializer = serializer_for(RepositoryVersion, read_only_fields=("immutable",))
 JobSerializer = serializer_for(Job)
 ScanSerializer = serializer_for(Scan, read_only_fields=("state", "coverage"))
-FindingSerializer = serializer_for(Finding)
+class FindingSerializer(TenantModelSerializer):
+    latest_review = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Finding
+        fields = "__all__"
+        read_only_fields = ("tenant", "version", "created_at", "updated_at", "status", "latest_review")
+
+    def get_latest_review(self, finding):
+        review = finding.reviews.order_by("-reviewed_at", "-created_at").first()
+        return FindingReviewSerializer(review).data if review else None
+
+
+class FindingReviewSerializer(TenantModelSerializer):
+    reviewer_identity = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FindingReview
+        fields = "__all__"
+        read_only_fields = (
+            "tenant", "version", "created_at", "updated_at", "reviewer", "reviewer_identity", "reviewed_at"
+        )
+
+    def get_reviewer_identity(self, review):
+        return {"id": str(review.reviewer_id), "name": review.reviewer.get_username()}
+
+
 FindingEvidenceSerializer = serializer_for(FindingEvidence)
 ThreatModelSerializer = serializer_for(ThreatModel)
 ArchitectureComponentSerializer = serializer_for(ArchitectureComponent)
@@ -167,6 +194,7 @@ SERIALIZERS = {
     Job: JobSerializer,
     Scan: ScanSerializer,
     Finding: FindingSerializer,
+    FindingReview: FindingReviewSerializer,
     FindingEvidence: FindingEvidenceSerializer,
     ThreatModel: ThreatModelSerializer,
     ArchitectureComponent: ArchitectureComponentSerializer,

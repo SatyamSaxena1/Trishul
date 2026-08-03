@@ -36,6 +36,7 @@ from .models import (
     Evidence,
     Finding,
     FindingEvidence,
+    FindingReview,
     FrameworkVersion,
     Job,
     Membership,
@@ -89,6 +90,7 @@ PERMISSION_PREFIX = {
     Scan: "scan",
     Finding: "finding",
     FindingEvidence: "evidence",
+    FindingReview: "finding",
     ThreatModel: "threat_model",
     ArchitectureComponent: "threat_model",
     DataFlow: "threat_model",
@@ -122,6 +124,7 @@ APPLICATION_PATH = {
     Scan: "repository_version__repository__application_id",
     Finding: "scan__repository_version__repository__application_id",
     FindingEvidence: "finding__scan__repository_version__repository__application_id",
+    FindingReview: "finding__scan__repository_version__repository__application_id",
     ThreatModel: "application_id",
     ArchitectureComponent: "threat_model__application_id",
     DataFlow: "threat_model__application_id",
@@ -299,6 +302,62 @@ class ServiceAccountViewSet(viewset_for(ServiceAccount)):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class FindingReviewViewSet(viewset_for(FindingReview, immutable=True)):
+    http_method_names = ["get", "post", "head", "options"]
+
+    def perform_create(self, serializer):
+        if isinstance(self.request.user, ServicePrincipal):
+            raise exceptions.PermissionDenied("Analyzer, AI, and service accounts cannot set analyst decisions.")
+        finding = serializer.validated_data["finding"]
+        previous = finding.reviews.order_by("-reviewed_at", "-created_at").first()
+        review = serializer.save(tenant=self.request.tenant, reviewer=self.request.user, reviewed_at=timezone.now())
+        actor_type, actor_id = actor(self.request)
+        AuditEvent.append(
+            tenant=self.request.tenant,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            action="finding.reviewed",
+            resource_type="core.findingreview",
+            resource_id=review.pk,
+            details={
+                "finding_id": str(finding.id),
+                "decision": review.decision,
+                "reason_codes": review.reason_codes,
+                "comment": review.comment,
+                "reviewer_id": str(review.reviewer_id),
+                "reviewed_at": review.reviewed_at.isoformat(),
+                "previous_review_id": str(previous.id) if previous else None,
+                "provenance": {
+                    "scan_id": str(finding.scan_id),
+                    "rule_id": finding.rule_id,
+                    "rule_version": finding.rule_version,
+                    "fingerprint": finding.fingerprint,
+                },
+            },
+        )
+
+    @action(detail=False, methods=["get"], url_path="pilot-usefulness")
+    def pilot_usefulness(self, request):
+        latest = {}
+        for review in self.get_queryset().order_by("finding_id", "reviewed_at", "created_at"):
+            latest[review.finding_id] = review.decision
+        counts = {decision: 0 for decision, _ in FindingReview.Decision.choices}
+        for decision in latest.values():
+            counts[decision] += 1
+        conclusive = counts["accepted"] + counts["false_positive"]
+        return Response(
+            {
+                "accepted": counts["accepted"],
+                "false_positive": counts["false_positive"],
+                "duplicate": counts["duplicate"],
+                "needs_context": counts["needs_context"],
+                "conclusive": conclusive,
+                "usefulness": counts["accepted"] / conclusive if conclusive else None,
+                "definition": "accepted / (accepted + false_positive)",
+            }
+        )
+
+
 class RepositoryViewSet(viewset_for(Repository)):
     @action(detail=True, methods=["post"], url_path="imports")
     def import_archive(self, request, pk=None):
@@ -464,9 +523,34 @@ class ReportViewSet(viewset_for(Report, immutable=True)):
             raise exceptions.ValidationError({"report_type": "Use technical or executive."})
         findings = list(
             Finding.objects.filter(scan__repository_version__repository__application=application).values(
-                "id", "title", "severity", "confidence", "status", "cwe"
+                "id", "title", "severity", "confidence", "status", "cwe", "scan_id", "rule_id",
+                "rule_version", "fingerprint"
             )
         )
+        for finding in findings:
+            finding["decision_history"] = list(
+                FindingReview.objects.filter(finding_id=finding["id"])
+                .order_by("reviewed_at", "created_at")
+                .values(
+                    "id",
+                    "decision",
+                    "reason_codes",
+                    "comment",
+                    "reviewer_id",
+                    "reviewer__username",
+                    "reviewed_at",
+                    "created_at",
+                )
+            )
+        latest_decisions = {
+            finding["id"]: finding["decision_history"][-1]["decision"]
+            for finding in findings
+            if finding["decision_history"]
+        }
+        decision_counts = {decision: 0 for decision, _ in FindingReview.Decision.choices}
+        for decision in latest_decisions.values():
+            decision_counts[decision] += 1
+        conclusive = decision_counts["accepted"] + decision_counts["false_positive"]
         threats = list(
             Threat.objects.filter(threat_model__application=application).values(
                 "id", "stride_category", "scenario", "likelihood", "impact", "status"
@@ -480,6 +564,12 @@ class ReportViewSet(viewset_for(Report, immutable=True)):
             "generated_at": timezone.now().isoformat(),
             "application": {"id": str(application.id), "name": application.name},
             "findings": findings,
+            "pilot_usefulness": {
+                **decision_counts,
+                "conclusive": conclusive,
+                "usefulness": decision_counts["accepted"] / conclusive if conclusive else None,
+                "definition": "accepted / (accepted + false_positive)",
+            },
             "threats": threats,
             "assessments": assessments,
             "risks": risks,
@@ -537,6 +627,7 @@ MODEL_VIEWSETS = {
     "scans": ScanViewSet,
     "findings": viewset_for(Finding),
     "finding-evidence": viewset_for(FindingEvidence, immutable=True),
+    "finding-reviews": FindingReviewViewSet,
     "threat-models": ThreatModelViewSet,
     "architecture-components": viewset_for(ArchitectureComponent),
     "data-flows": viewset_for(DataFlow),
