@@ -46,4 +46,8 @@ Restore verifies checksums and authenticated encryption, restores PostgreSQL, ap
 
 Alert on repeated authorization failures, RLS denials, audit-chain failures, export spikes, unavailable object storage, queue depth, stale job leases, analyzer failures, AI budget/policy rejection, disk pressure, and backup failure.
 
+During the pilot, use the [pilot triage review template](pilot-triage-template.md)
+to review reliability, analyst workflow, incidents, capacity, and acceptance
+blockers and to enforce the defect intake requirements.
+
 The later Kubernetes/OpenShift profile, including installation and recovery contracts, is documented in [enterprise deployment](enterprise-deployment.md). Compose remains the supported MVP profile.
