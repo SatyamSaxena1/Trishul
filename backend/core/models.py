@@ -296,6 +296,35 @@ class Finding(TenantScopedModel):
         ]
 
 
+class FindingReview(TenantScopedModel):
+    """An immutable, human-authored decision in a finding's review history."""
+
+    class Decision(models.TextChoices):
+        ACCEPTED = "accepted", "Accepted"
+        FALSE_POSITIVE = "false_positive", "False positive"
+        DUPLICATE = "duplicate", "Duplicate"
+        NEEDS_CONTEXT = "needs_context", "Needs context"
+
+    finding = models.ForeignKey(Finding, on_delete=models.PROTECT, related_name="reviews")
+    decision = models.CharField(max_length=20, choices=Decision.choices)
+    reason_codes = models.JSONField(default=list, blank=True)
+    reviewer_comment = models.TextField(blank=True, max_length=2000)
+    reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    reviewed_at = models.DateTimeField(default=timezone.now)
+    finding_provenance = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ["reviewed_at", "id"]
+
+    def save(self, *args, **kwargs):
+        if self.pk and FindingReview.all_objects.filter(pk=self.pk).exists():
+            raise ValidationError("Finding reviews are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Finding reviews are immutable.")
+
+
 class FindingEvidence(TenantScopedModel):
     finding = models.ForeignKey(Finding, on_delete=models.PROTECT, related_name="evidence")
     file_path = models.CharField(max_length=600)

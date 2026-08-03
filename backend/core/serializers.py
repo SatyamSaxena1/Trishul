@@ -15,6 +15,7 @@ from .models import (
     Evidence,
     Finding,
     FindingEvidence,
+    FindingReview,
     FrameworkVersion,
     Job,
     Membership,
@@ -82,7 +83,50 @@ RepositorySerializer = serializer_for(Repository)
 RepositoryVersionSerializer = serializer_for(RepositoryVersion, read_only_fields=("immutable",))
 JobSerializer = serializer_for(Job)
 ScanSerializer = serializer_for(Scan, read_only_fields=("state", "coverage"))
-FindingSerializer = serializer_for(Finding)
+class FindingReviewSerializer(TenantModelSerializer):
+    ALLOWED_REASON_CODES = {
+        "confirmed_exploitable",
+        "defense_in_depth",
+        "test_or_nonproduction_code",
+        "sanitized_or_unreachable",
+        "scanner_misclassification",
+        "same_root_cause",
+        "insufficient_evidence",
+        "owner_input_required",
+    }
+
+    class Meta:
+        model = FindingReview
+        fields = "__all__"
+        read_only_fields = (
+            "tenant", "version", "created_at", "updated_at", "reviewer", "reviewed_at", "finding_provenance"
+        )
+
+    def validate_reason_codes(self, value):
+        if not isinstance(value, list) or len(value) > 5 or any(not isinstance(code, str) for code in value):
+            raise serializers.ValidationError("Provide an array containing at most five reason codes.")
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("Reason codes must be unique.")
+        unknown = set(value) - self.ALLOWED_REASON_CODES
+        if unknown:
+            raise serializers.ValidationError(f"Unsupported reason code(s): {', '.join(sorted(unknown))}.")
+        return value
+
+
+class FindingSerializer(TenantModelSerializer):
+    analyst_decision = serializers.SerializerMethodField()
+    decision_history = FindingReviewSerializer(source="reviews", many=True, read_only=True)
+
+    class Meta:
+        model = Finding
+        fields = "__all__"
+        read_only_fields = ("tenant", "version", "created_at", "updated_at", "status")
+
+    def get_analyst_decision(self, obj):
+        latest = obj.reviews.order_by("-reviewed_at", "-id").first()
+        return FindingReviewSerializer(latest).data if latest else None
+
+
 FindingEvidenceSerializer = serializer_for(FindingEvidence)
 ThreatModelSerializer = serializer_for(ThreatModel)
 ArchitectureComponentSerializer = serializer_for(ArchitectureComponent)
@@ -167,6 +211,7 @@ SERIALIZERS = {
     Job: JobSerializer,
     Scan: ScanSerializer,
     Finding: FindingSerializer,
+    FindingReview: FindingReviewSerializer,
     FindingEvidence: FindingEvidenceSerializer,
     ThreatModel: ThreatModelSerializer,
     ArchitectureComponent: ArchitectureComponentSerializer,
