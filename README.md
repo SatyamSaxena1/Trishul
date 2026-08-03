@@ -21,6 +21,9 @@ AI Trishul is a customer-hosted security intelligence MVP connecting evidence-ba
 
 The Python language pack is intentionally marked `experimental` until representative first-customer repositories establish its precision, recall, framework coverage, and maintenance acceptance.
 
+Product priorities for the post-MVP pilot are governed by [ADR-0001: post-pilot primary
+investment](docs/decisions/0001-post-pilot-primary-investment.md).
+
 ## Development
 
 ```text
