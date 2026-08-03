@@ -305,6 +305,20 @@ class FindingEvidence(TenantScopedModel):
     object_key = models.CharField(max_length=600, blank=True)
 
 
+class FindingReview(TenantScopedModel):
+    class Outcome(models.TextChoices):
+        ACCEPTED = "accepted", "Accepted"
+        FALSE_POSITIVE = "false_positive", "False positive"
+        DUPLICATE = "duplicate", "Duplicate"
+        NEEDS_CONTEXT = "needs_context", "Needs context"
+
+    finding = models.ForeignKey(Finding, on_delete=models.PROTECT, related_name="reviews")
+    outcome = models.CharField(max_length=30, choices=Outcome.choices)
+    useful = models.BooleanField(null=True, blank=True)
+    feedback = models.TextField(blank=True, max_length=4000)
+    unresolved_blocker = models.BooleanField(default=False)
+
+
 class ThreatModel(TenantScopedModel):
     application = models.ForeignKey(Application, on_delete=models.PROTECT)
     name = models.CharField(max_length=200)
