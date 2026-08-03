@@ -42,3 +42,5 @@ On Windows, replace `.venv/bin` with `.venv/Scripts`.
 6. Bootstrap the first OIDC subject with `sh bin/trishulctl bootstrap SUBJECT EMAIL TENANT_SLUG "Tenant Name"`.
 
 See [operations](docs/operations.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), and [architecture](docs/architecture.md).
+
+Production candidates must also pass the fail-closed [release acceptance gate](docs/release-gate.md); unmet mandatory criteria are a NO-GO.
