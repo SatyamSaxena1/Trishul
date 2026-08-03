@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "trishul.settings_test"
-pythonpath = ["backend"]
+pythonpath = ["backend", "."]
 testpaths = ["backend/core/tests"]
 addopts = "-q"
 
