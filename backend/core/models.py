@@ -305,6 +305,43 @@ class FindingEvidence(TenantScopedModel):
     object_key = models.CharField(max_length=600, blank=True)
 
 
+class FindingReview(TenantScopedModel):
+    """An immutable, human-authored decision in a finding's review history."""
+
+    class Decision(models.TextChoices):
+        ACCEPTED = "accepted", "Accepted"
+        FALSE_POSITIVE = "false_positive", "False positive"
+        DUPLICATE = "duplicate", "Duplicate"
+        NEEDS_CONTEXT = "needs_context", "Needs context"
+
+    finding = models.ForeignKey(Finding, on_delete=models.PROTECT, related_name="reviews")
+    decision = models.CharField(max_length=20, choices=Decision.choices)
+    reason_codes = models.JSONField(default=list, blank=True)
+    comment = models.TextField(blank=True, max_length=2000)
+    reviewer = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="finding_reviews")
+    reviewed_at = models.DateTimeField(default=timezone.now)
+
+    def clean(self):
+        super().clean()
+        if not isinstance(self.reason_codes, list) or len(self.reason_codes) > 10:
+            raise ValidationError({"reason_codes": "Provide at most 10 reason-code strings."})
+        allowed = {
+            "exploitable", "intended_behavior", "compensating_control", "test_code",
+            "analyzer_error", "same_root_cause", "insufficient_evidence", "requires_owner_input",
+        }
+        invalid = [code for code in self.reason_codes if not isinstance(code, str) or code not in allowed]
+        if invalid:
+            raise ValidationError({"reason_codes": "One or more reason codes are not supported."})
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("Finding review history is immutable; append a new review instead.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Finding review history is immutable.")
+
+
 class ThreatModel(TenantScopedModel):
     application = models.ForeignKey(Application, on_delete=models.PROTECT)
     name = models.CharField(max_length=200)
