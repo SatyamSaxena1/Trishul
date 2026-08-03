@@ -41,4 +41,4 @@ On Windows, replace `.venv/bin` with `.venv/Scripts`.
 5. Run `sh bin/trishulctl doctor`, then `sh bin/trishulctl install`.
 6. Bootstrap the first OIDC subject with `sh bin/trishulctl bootstrap SUBJECT EMAIL TENANT_SLUG "Tenant Name"`.
 
-See [operations](docs/operations.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), and [architecture](docs/architecture.md).
+See [operations](docs/operations.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), [architecture](docs/architecture.md), and the blank [design-partner sign-off template](docs/design-partner-sign-off-template.md). Completed or signed sign-off records must be stored in the approved customer-record system, not in this repository.
