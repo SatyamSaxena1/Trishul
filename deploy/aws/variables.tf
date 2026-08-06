@@ -3,6 +3,52 @@ variable "aws_region" {
   default = "ap-south-1"
 }
 
+variable "dr_region" {
+  type        = string
+  default     = "ap-southeast-1"
+  description = "Destination region for replicated data and recovery-mode compute."
+}
+
+variable "deployment_mode" {
+  type        = string
+  default     = "primary"
+  description = "Primary manages replication; recovery restores the regional stack from replicated data."
+  validation {
+    condition     = contains(["primary", "recovery"], var.deployment_mode)
+    error_message = "deployment_mode must be primary or recovery."
+  }
+}
+
+variable "recovery_evidence_bucket_name" {
+  type        = string
+  default     = ""
+  description = "Replicated evidence bucket to use in recovery mode."
+}
+
+variable "recovery_evidence_kms_key_arn" {
+  type        = string
+  default     = ""
+  description = "Destination-region KMS key ARN used by the replicated evidence bucket."
+}
+
+variable "recovery_db_automated_backups_arn" {
+  type        = string
+  default     = ""
+  description = "Destination-region automated-backup ARN used for latest-point-in-time recovery."
+}
+
+variable "recovery_runtime_secret_name" {
+  type        = string
+  default     = ""
+  description = "Optional override for the replicated runtime secret name in recovery mode."
+}
+
+variable "recovery_drill" {
+  type        = bool
+  default     = false
+  description = "Allows a non-production recovery drill to destroy its restored database without a final snapshot."
+}
+
 variable "environment" {
   type    = string
   default = "pilot"

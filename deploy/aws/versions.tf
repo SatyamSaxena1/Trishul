@@ -25,3 +25,16 @@ provider "aws" {
     }
   }
 }
+
+provider "aws" {
+  alias  = "dr"
+  region = var.dr_region
+
+  default_tags {
+    tags = {
+      Application = "trishul-cloud"
+      Environment = var.environment
+      ManagedBy   = "terraform"
+    }
+  }
+}
