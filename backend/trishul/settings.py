@@ -150,6 +150,8 @@ S3_BUCKET = os.getenv("S3_BUCKET", "trishul")
 S3_ACCESS_KEY = secret("S3_ACCESS_KEY")
 S3_SECRET_KEY = secret("S3_SECRET_KEY")
 S3_CA_BUNDLE = os.getenv("S3_CA_BUNDLE", "") or None
+AUDIT_CHECKPOINT_BUCKET = os.getenv("AUDIT_CHECKPOINT_BUCKET", "")
+AUDIT_CHECKPOINT_PREFIX = os.getenv("AUDIT_CHECKPOINT_PREFIX", "audit-checkpoints")
 INTERNAL_AI_TOKEN = secret("INTERNAL_AI_TOKEN", "unsafe-development-internal-token" if DEBUG else "")
 METRICS_TOKEN = secret("METRICS_TOKEN")
 

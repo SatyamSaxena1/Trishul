@@ -16,7 +16,7 @@ frontend/vite.config.d.ts
 *.tfstate
 *.tfstate.*
 *.tfplan
-deploy/aws/backend.hcl
+deploy/aws/**/backend.hcl
 deploy/kubernetes/aws/aws.env
 secrets/*
 !secrets/.gitkeep

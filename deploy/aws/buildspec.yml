@@ -8,7 +8,7 @@ phases:
     commands:
       - aws eks update-kubeconfig --region "$AWS_REGION" --name "$TRISHUL_CLUSTER_NAME"
       - cp deploy/kubernetes/aws/aws.env.example deploy/kubernetes/aws/aws.env
-      - sed -i "s|^DB_HOST=.*|DB_HOST=$TRISHUL_DB_HOST|; s|^REDIS_HOST=.*|REDIS_HOST=$TRISHUL_REDIS_HOST|; s|^S3_REGION=.*|S3_REGION=$AWS_REGION|; s|^S3_BUCKET=.*|S3_BUCKET=$TRISHUL_S3_BUCKET|" deploy/kubernetes/aws/aws.env
+      - sed -i "s|^DB_HOST=.*|DB_HOST=$TRISHUL_DB_HOST|; s|^REDIS_HOST=.*|REDIS_HOST=$TRISHUL_REDIS_HOST|; s|^S3_REGION=.*|S3_REGION=$AWS_REGION|; s|^S3_BUCKET=.*|S3_BUCKET=$TRISHUL_S3_BUCKET|; s|^AUDIT_CHECKPOINT_BUCKET=.*|AUDIT_CHECKPOINT_BUCKET=$TRISHUL_AUDIT_CHECKPOINT_BUCKET|" deploy/kubernetes/aws/aws.env
       - kubectl auth can-i create deployments --namespace ai-trishul
   build:
     commands:

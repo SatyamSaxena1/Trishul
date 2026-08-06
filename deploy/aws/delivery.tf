@@ -108,6 +108,10 @@ resource "aws_codebuild_project" "deploy" {
       name  = "TRISHUL_S3_BUCKET"
       value = aws_s3_bucket.evidence.id
     }
+    environment_variable {
+      name  = "TRISHUL_AUDIT_CHECKPOINT_BUCKET"
+      value = var.audit_checkpoint_bucket_name
+    }
   }
 
   source {
