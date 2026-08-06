@@ -275,7 +275,7 @@ resource "aws_eks_cluster" "main" {
   vpc_config {
     subnet_ids              = concat(values(aws_subnet.private)[*].id, values(aws_subnet.public)[*].id)
     endpoint_private_access = true
-    endpoint_public_access  = true
+    endpoint_public_access  = var.eks_public_endpoint_enabled
     security_group_ids      = [aws_security_group.eks_nodes.id]
   }
   depends_on = [aws_iam_role_policy_attachment.eks_cluster]

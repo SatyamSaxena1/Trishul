@@ -1307,7 +1307,7 @@ def ready(request):
     except Exception:
         logger.exception("Queue readiness failed")
         checks["queue"] = "failed"
-    if settings.S3_ENDPOINT_URL:
+    if settings.S3_BUCKET:
         try:
             storage_healthcheck()
             checks["object_storage"] = "ok"

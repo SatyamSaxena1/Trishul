@@ -72,11 +72,12 @@ jobs:
           version: v1.34.1
       - run: kubectl kustomize deploy/kubernetes/base >/dev/null
       - run: kubectl kustomize deploy/kubernetes/openshift >/dev/null
+      - run: cp deploy/kubernetes/aws/aws.env.example deploy/kubernetes/aws/aws.env && kubectl kustomize deploy/kubernetes/aws >/dev/null
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "1.13.5"
       - working-directory: deploy/aws
-        run: terraform fmt -check && terraform init -backend=false && terraform validate
+        run: terraform fmt -check && terraform init -backend=false && terraform validate && terraform test
       - run: sh -n bin/trishulctl bin/trishulkube
       - name: Verify the deployment gate client is self-contained
         run: |

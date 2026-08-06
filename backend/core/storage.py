@@ -6,16 +6,15 @@ from django.conf import settings
 
 @lru_cache(maxsize=1)
 def client():
-    if not settings.S3_ENDPOINT_URL:
-        raise RuntimeError("S3_ENDPOINT_URL is required")
-    return boto3.client(
-        "s3",
-        endpoint_url=settings.S3_ENDPOINT_URL,
-        region_name=settings.S3_REGION,
-        aws_access_key_id=settings.S3_ACCESS_KEY,
-        aws_secret_access_key=settings.S3_SECRET_KEY,
-        verify=settings.S3_CA_BUNDLE or True,
-    )
+    options = {"region_name": settings.S3_REGION, "verify": settings.S3_CA_BUNDLE or True}
+    if settings.S3_ENDPOINT_URL:
+        options["endpoint_url"] = settings.S3_ENDPOINT_URL
+    if settings.S3_ACCESS_KEY and settings.S3_SECRET_KEY:
+        options.update(
+            aws_access_key_id=settings.S3_ACCESS_KEY,
+            aws_secret_access_key=settings.S3_SECRET_KEY,
+        )
+    return boto3.client("s3", **options)
 
 
 def put_file(key, file_obj, *, content_type="application/octet-stream"):
@@ -24,7 +23,7 @@ def put_file(key, file_obj, *, content_type="application/octet-stream"):
         file_obj,
         settings.S3_BUCKET,
         key,
-        ExtraArgs={"ContentType": content_type, "ServerSideEncryption": "AES256"},
+        ExtraArgs={"ContentType": content_type},
     )
 
 
