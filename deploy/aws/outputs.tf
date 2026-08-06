@@ -7,3 +7,6 @@ output "redis_endpoint" { value = aws_elasticache_serverless_cache.redis.endpoin
 output "runtime_secret_arn" { value = aws_secretsmanager_secret.runtime.arn }
 output "waf_acl_arn" { value = aws_wafv2_web_acl.edge.arn }
 output "operations_topic_arn" { value = aws_sns_topic.operations.arn }
+output "deploy_codebuild_project" { value = aws_codebuild_project.deploy.name }
+output "github_deploy_role_arn" { value = aws_iam_role.github_deploy.arn }
+output "application_pod_identity_role_arn" { value = aws_iam_role.application.arn }
