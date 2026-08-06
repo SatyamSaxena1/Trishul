@@ -9,7 +9,7 @@ import httpx
 from django.conf import settings
 from jsonschema import validate
 
-from .runner import RESULT_SCHEMA
+from .runner import NORMALIZED_SCHEMA, RESULT_SCHEMA
 from .storage import delete_file, download_file, presigned_get, presigned_put
 
 MAX_ARCHIVE = 250 * 1024 * 1024
@@ -46,20 +46,14 @@ class KubernetesAPI:
         if allow_not_found and response.status_code == 404:
             return {}
         if response.status_code >= 400:
-            raise KubernetesRunnerError(
-                f"Kubernetes API {method} {path} failed with {response.status_code}"
-            )
+            raise KubernetesRunnerError(f"Kubernetes API {method} {path} failed with {response.status_code}")
         return response.json() if response.content else {}
 
     def create_job(self, body):
-        return self.request(
-            "POST", f"/apis/batch/v1/namespaces/{self.namespace}/jobs", body=body
-        )
+        return self.request("POST", f"/apis/batch/v1/namespaces/{self.namespace}/jobs", body=body)
 
     def create_pvc(self, body):
-        return self.request(
-            "POST", f"/api/v1/namespaces/{self.namespace}/persistentvolumeclaims", body=body
-        )
+        return self.request("POST", f"/api/v1/namespaces/{self.namespace}/persistentvolumeclaims", body=body)
 
     def wait_job(self, name, timeout):
         deadline = time.monotonic() + timeout
@@ -108,6 +102,12 @@ def _security_context(uid):
 
 
 def _job(name, role, image, command, pvc, *, cpu="500m", memory="512Mi", deadline=900):
+    mounts = [{"name": "work", "mountPath": "/work"}]
+    if role == "analyzer":
+        mounts = [
+            {"name": "work", "mountPath": "/input", "subPath": "input", "readOnly": True},
+            {"name": "work", "mountPath": "/output", "subPath": "output"},
+        ]
     body = {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -133,7 +133,7 @@ def _job(name, role, image, command, pvc, *, cpu="500m", memory="512Mi", deadlin
                                 "requests": {"cpu": "100m", "memory": "128Mi"},
                                 "limits": {"cpu": cpu, "memory": memory},
                             },
-                            "volumeMounts": [{"name": "work", "mountPath": "/work"}],
+                            "volumeMounts": mounts,
                         }
                     ],
                     "volumes": [{"name": "work", "persistentVolumeClaim": {"claimName": pvc}}],
@@ -148,14 +148,14 @@ def _job(name, role, image, command, pvc, *, cpu="500m", memory="512Mi", deadlin
     return body
 
 
-def analyze(*, repository_version, scan_id):
+def _execute(*, object_key, tenant_id, job_id, analyzer_command, maximum_input, maximum_result, timeout):
     api = KubernetesAPI()
-    suffix = str(scan_id).replace("-", "")[:20]
+    suffix = str(job_id).replace("-", "")[:20]
     pvc = f"scan-{suffix}"
     stage = f"stage-{suffix}"
     analyzer = f"analyze-{suffix}"
     collect = f"collect-{suffix}"
-    result_key = f"{repository_version.tenant_id}/scan-results/{scan_id}.json"
+    result_key = f"{tenant_id}/analysis-results/{job_id}.json"
     storage_class = os.getenv("KUBE_SCRATCH_STORAGE_CLASS")
     pvc_spec = {
         "apiVersion": "v1",
@@ -182,10 +182,12 @@ def analyze(*, repository_version, scan_id):
                     "-m",
                     "core.kube_transfer",
                     "download",
-                    presigned_get(repository_version.object_key),
-                    "/work/input.archive",
+                    presigned_get(object_key),
+                    "/work/input/artifact",
                     "--maximum",
-                    str(MAX_ARCHIVE),
+                    str(maximum_input),
+                    "--output-directory",
+                    "/work/output",
                 ],
                 pvc,
             )
@@ -196,14 +198,14 @@ def analyze(*, repository_version, scan_id):
                 analyzer,
                 "analyzer",
                 analyzer_image,
-                ["python", "/app/main.py", "/work/input.archive", "/work/results.json"],
+                analyzer_command,
                 pvc,
                 cpu="2",
                 memory="4Gi",
-                deadline=1800,
+                deadline=timeout,
             )
         )
-        api.wait_job(analyzer, 1800)
+        api.wait_job(analyzer, timeout)
         api.create_job(
             _job(
                 collect,
@@ -215,9 +217,9 @@ def analyze(*, repository_version, scan_id):
                     "core.kube_transfer",
                     "upload",
                     presigned_put(result_key),
-                    "/work/results.json",
+                    "/work/output/result.json",
                     "--maximum",
-                    str(MAX_RESULT),
+                    str(maximum_result),
                 ],
                 pvc,
             )
@@ -226,12 +228,48 @@ def analyze(*, repository_version, scan_id):
         with tempfile.TemporaryDirectory(prefix="trishul-kube-result-") as directory:
             result_path = Path(directory) / "result.json"
             download_file(result_key, str(result_path))
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-        validate(result, RESULT_SCHEMA)
-        return result
+            return json.loads(result_path.read_text(encoding="utf-8"))
     finally:
         for job in (stage, analyzer, collect):
             api.cleanup(job)
         api.cleanup_pvc(pvc)
         with suppress(Exception):
             delete_file(result_key)
+
+
+def analyze(*, repository_version, scan_id):
+    result = _execute(
+        object_key=repository_version.object_key,
+        tenant_id=repository_version.tenant_id,
+        job_id=scan_id,
+        analyzer_command=["python", "/app/main.py", "/input/artifact", "/output/result.json"],
+        maximum_input=MAX_ARCHIVE,
+        maximum_result=MAX_RESULT,
+        timeout=1800,
+    )
+    validate(result, RESULT_SCHEMA)
+    return result
+
+
+def normalize_deployment(*, snapshot, run_id):
+    from deployment_assurance.limits import MAX_ARTIFACT_BYTES, MAX_NORMALIZED_BYTES
+
+    result = _execute(
+        object_key=snapshot.artifact_object_key,
+        tenant_id=snapshot.tenant_id,
+        job_id=run_id,
+        analyzer_command=[
+            "python",
+            "/app/main.py",
+            "normalize",
+            snapshot.source_type,
+            "/input/artifact",
+            "/output/result.json",
+            snapshot.target.provider,
+        ],
+        maximum_input=MAX_ARTIFACT_BYTES,
+        maximum_result=MAX_NORMALIZED_BYTES,
+        timeout=120,
+    )
+    validate(result, NORMALIZED_SCHEMA)
+    return result

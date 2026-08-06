@@ -30,8 +30,25 @@ class UUIDModel(models.Model):
 
 
 class Tenant(UUIDModel):
+    class Type(models.TextChoices):
+        PLATFORM = "platform", "Platform"
+        AUDIT_FIRM = "audit_firm", "Audit firm"
+        AUDITEE = "auditee", "Auditee organisation"
+
+    class AuditeeMode(models.TextChoices):
+        FIRM_MANAGED = "firm_managed", "Firm managed"
+        SELF_SERVICE = "self_service", "Self service"
+
+    class IsolationTier(models.TextChoices):
+        SHARED = "shared", "Shared SaaS"
+        ENTERPRISE = "enterprise", "Enterprise isolated SaaS"
+        DEDICATED = "dedicated", "Dedicated/private"
+
     slug = models.SlugField(max_length=80, unique=True)
     name = models.CharField(max_length=200)
+    tenant_type = models.CharField(max_length=20, choices=Type.choices, default=Type.AUDITEE)
+    auditee_mode = models.CharField(max_length=20, choices=AuditeeMode.choices, blank=True)
+    isolation_tier = models.CharField(max_length=20, choices=IsolationTier.choices, default=IsolationTier.SHARED)
     is_active = models.BooleanField(default=True)
     retention_days = models.PositiveIntegerField(default=365)
 
@@ -114,6 +131,15 @@ class Membership(TenantScopedModel):
         MANAGER = "manager", "Engineering manager"
         AUDITOR = "auditor", "Auditor"
         EXECUTIVE = "executive", "Executive"
+        PLATFORM_ADMIN = "platform_admin", "Platform administrator"
+        FIRM_ADMIN = "firm_admin", "Audit firm administrator"
+        AUDIT_MANAGER = "audit_manager", "Audit manager"
+        REVIEWER = "reviewer", "Reviewer / QA"
+        ORG_ADMIN = "org_admin", "Auditee administrator"
+        COMPLIANCE_MANAGER = "compliance_manager", "Compliance manager"
+        CONTROL_OWNER = "control_owner", "Control owner"
+        RISK_OWNER = "risk_owner", "Risk owner"
+        VENDOR_MANAGER = "vendor_manager", "Vendor manager"
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     role = models.CharField(max_length=20, choices=Role.choices)
@@ -123,6 +149,215 @@ class Membership(TenantScopedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant", "user"], name="membership_tenant_user_uniq")]
+
+
+class TenantRelationship(TenantScopedModel):
+    class Relationship(models.TextChoices):
+        MANAGES = "manages", "Manages"
+        CLIENT = "client", "Client"
+
+    related_tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="incoming_relationships")
+    relationship = models.CharField(max_length=20, choices=Relationship.choices)
+    status = models.CharField(max_length=20, default="active")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "related_tenant", "relationship"], name="tenant_relationship_uniq"
+            )
+        ]
+
+
+class SubscriptionPlan(TenantScopedModel):
+    key = models.SlugField(max_length=80)
+    plan_version = models.CharField(max_length=40, default="1.0")
+    name = models.CharField(max_length=160)
+    entitlements = models.JSONField(default=dict)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "key", "plan_version"], name="plan_version_uniq")]
+
+
+class TenantSubscription(TenantScopedModel):
+    class State(models.TextChoices):
+        TRIAL = "trial", "Trial"
+        ACTIVE = "active", "Active"
+        GRACE = "grace", "Grace period"
+        SUSPENDED = "suspended", "Suspended"
+        EXPIRED = "expired", "Expired"
+
+    plan_key = models.CharField(max_length=80)
+    plan_version = models.CharField(max_length=40)
+    entitlement_snapshot = models.JSONField(default=dict)
+    state = models.CharField(max_length=20, choices=State.choices, default=State.TRIAL)
+    trial_started_at = models.DateTimeField(null=True, blank=True)
+    trial_ends_at = models.DateTimeField(null=True, blank=True)
+    grace_ends_at = models.DateTimeField(null=True, blank=True)
+    suspended_at = models.DateTimeField(null=True, blank=True)
+
+
+class TenantEntitlement(TenantScopedModel):
+    code = models.CharField(max_length=80)
+    enabled = models.BooleanField(default=True)
+    limit = models.PositiveBigIntegerField(null=True, blank=True)
+    configuration = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "code"], name="tenant_entitlement_uniq")]
+
+
+class UsageRecord(TenantScopedModel):
+    metric = models.CharField(max_length=80)
+    quantity = models.PositiveBigIntegerField()
+    recorded_at = models.DateTimeField(default=timezone.now)
+    idempotency_key = models.CharField(max_length=200, blank=True)
+    source_type = models.CharField(max_length=100, blank=True)
+    source_id = models.UUIDField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "idempotency_key"],
+                condition=models.Q(idempotency_key__gt=""),
+                name="usage_idempotency_uniq",
+            )
+        ]
+        indexes = [models.Index(fields=["tenant", "metric", "recorded_at"], name="usage_metric_time_idx")]
+
+
+class TenantBranding(TenantScopedModel):
+    logo_object_key = models.CharField(max_length=600, blank=True)
+    primary_color = models.CharField(max_length=7, default="#1d4ed8")
+    report_name = models.CharField(max_length=160, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant"], name="tenant_branding_uniq")]
+
+
+class TenantInvitation(TenantScopedModel):
+    target_tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="invitations")
+    email = models.EmailField()
+    role = models.CharField(max_length=30, choices=Membership.Role.choices)
+    invited_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True)
+
+
+class Engagement(TenantScopedModel):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        ACTIVE = "active", "Active"
+        CLOSED = "closed", "Closed"
+        REVOKED = "revoked", "Revoked"
+
+    auditee_tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT, related_name="audit_engagements")
+    name = models.CharField(max_length=200)
+    reference = models.CharField(max_length=100)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    starts_on = models.DateField()
+    ends_on = models.DateField()
+    framework_scope = models.JSONField(default=list)
+    application_scope = models.JSONField(default=list, blank=True)
+    control_scope = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="engagements_created"
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="engagements_approved",
+    )
+    closed_reason = models.TextField(blank=True, max_length=4000)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "reference"], name="engagement_reference_uniq")]
+
+    def clean(self):
+        super().clean()
+        if self.tenant_id and self.tenant.tenant_type != Tenant.Type.AUDIT_FIRM:
+            raise ValidationError({"tenant": "Engagements must be owned by an audit-firm tenant."})
+        if self.auditee_tenant_id and self.auditee_tenant.tenant_type != Tenant.Type.AUDITEE:
+            raise ValidationError({"auditee_tenant": "An engagement target must be an auditee tenant."})
+        if self.starts_on and self.ends_on and self.starts_on > self.ends_on:
+            raise ValidationError({"ends_on": "The engagement end date must not precede its start date."})
+
+    def is_live(self, on_date=None):
+        on_date = on_date or timezone.localdate()
+        return self.status == self.Status.ACTIVE and self.starts_on <= on_date <= self.ends_on
+
+
+class EngagementScope(TenantScopedModel):
+    class Type(models.TextChoices):
+        FRAMEWORK = "framework", "Framework"
+        APPLICATION = "application", "Application"
+        CONTROL = "control", "Control"
+
+    engagement = models.ForeignKey(Engagement, on_delete=models.PROTECT, related_name="scopes")
+    scope_type = models.CharField(max_length=20, choices=Type.choices)
+    object_reference = models.CharField(max_length=200)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "engagement", "scope_type", "object_reference"], name="engagement_scope_uniq"
+            )
+        ]
+
+
+class EngagementMember(TenantScopedModel):
+    class Role(models.TextChoices):
+        LEAD = "lead", "Lead auditor"
+        AUDITOR = "auditor", "Auditor"
+        REVIEWER = "reviewer", "Reviewer / QA"
+
+    engagement = models.ForeignKey(Engagement, on_delete=models.PROTECT, related_name="members")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    role = models.CharField(max_length=20, choices=Role.choices)
+    framework_scope = models.JSONField(default=list, blank=True)
+    control_scope = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "engagement", "user"], name="engagement_member_uniq")]
+
+
+class ImmutableTenantRecord(TenantScopedModel):
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if self.pk and type(self).all_objects.filter(pk=self.pk).exists():
+            raise ValidationError(f"{self._meta.verbose_name_plural.title()} are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError(f"{self._meta.verbose_name_plural.title()} are immutable.")
+
+
+class EngagementStatusHistory(ImmutableTenantRecord):
+    engagement = models.ForeignKey(Engagement, on_delete=models.PROTECT, related_name="status_history")
+    from_status = models.CharField(max_length=20, blank=True)
+    to_status = models.CharField(max_length=20, choices=Engagement.Status.choices)
+    reason = models.TextField(blank=True, max_length=4000)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    occurred_at = models.DateTimeField(default=timezone.now)
+
+
+class CrossTenantAccessEvent(ImmutableTenantRecord):
+    target_tenant = models.ForeignKey(
+        Tenant, on_delete=models.PROTECT, null=True, blank=True, related_name="cross_tenant_access_events"
+    )
+    engagement = models.ForeignKey(Engagement, on_delete=models.PROTECT, null=True, blank=True)
+    subject_id = models.CharField(max_length=200)
+    object_type = models.CharField(max_length=100)
+    object_id = models.CharField(max_length=200, blank=True)
+    action = models.CharField(max_length=80)
+    decision = models.CharField(max_length=20, choices=[("allow", "Allow"), ("deny", "Deny")])
+    reason = models.CharField(max_length=300)
+    occurred_at = models.DateTimeField(default=timezone.now)
 
 
 class ServiceAccount(TenantScopedModel):
@@ -351,6 +586,9 @@ class Threat(TenantScopedModel):
 
 
 class FrameworkVersion(TenantScopedModel):
+    framework_record = models.ForeignKey(
+        "Framework", on_delete=models.PROTECT, null=True, blank=True, related_name="versions"
+    )
     framework = models.CharField(max_length=120)
     version_name = models.CharField(max_length=80)
     source_url = models.URLField()
@@ -363,6 +601,16 @@ class FrameworkVersion(TenantScopedModel):
         ]
 
 
+class Framework(TenantScopedModel):
+    code = models.SlugField(max_length=80)
+    name = models.CharField(max_length=200)
+    issuing_body = models.CharField(max_length=200, blank=True)
+    status = models.CharField(max_length=20, default="published")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "code"], name="framework_code_uniq")]
+
+
 class Requirement(TenantScopedModel):
     framework_version = models.ForeignKey(FrameworkVersion, on_delete=models.PROTECT, related_name="requirements")
     control_id = models.CharField(max_length=80)
@@ -373,6 +621,149 @@ class Requirement(TenantScopedModel):
         constraints = [
             models.UniqueConstraint(
                 fields=["tenant", "framework_version", "control_id"], name="requirement_control_uniq"
+            )
+        ]
+
+
+class UnifiedControlObjective(TenantScopedModel):
+    class ControlType(models.TextChoices):
+        PREVENTIVE = "preventive", "Preventive"
+        DETECTIVE = "detective", "Detective"
+        CORRECTIVE = "corrective", "Corrective"
+
+    class Nature(models.TextChoices):
+        TECHNICAL = "technical", "Technical"
+        PROCESS = "process", "Process"
+        DOCUMENTATION = "documentation", "Documentation"
+
+    code = models.CharField(max_length=80)
+    objective_version = models.CharField(max_length=40, default="1.0")
+    domain = models.CharField(max_length=80)
+    objective = models.TextField(max_length=8000)
+    control_type = models.CharField(max_length=20, choices=ControlType.choices)
+    nature = models.CharField(max_length=20, choices=Nature.choices)
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "code", "objective_version"], name="uco_version_uniq")]
+
+
+class FrameworkControlMapping(TenantScopedModel):
+    class Coverage(models.TextChoices):
+        FULL = "full", "Full"
+        PARTIAL = "partial", "Partial"
+        SUPPORTING = "supporting", "Supporting"
+        NONE = "none", "None"
+
+    class Source(models.TextChoices):
+        EXPERT = "expert", "Expert"
+        AI = "ai", "AI proposed"
+
+    requirement = models.ForeignKey(Requirement, on_delete=models.PROTECT, related_name="control_mappings")
+    unified_control = models.ForeignKey(
+        UnifiedControlObjective, on_delete=models.PROTECT, related_name="framework_mappings"
+    )
+    coverage = models.CharField(max_length=20, choices=Coverage.choices)
+    delta_condition = models.JSONField(default=dict, blank=True)
+    rationale = models.TextField(blank=True, max_length=4000)
+    confidence = models.DecimalField(max_digits=4, decimal_places=3, default=1)
+    mapping_source = models.CharField(max_length=20, choices=Source.choices, default=Source.EXPERT)
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "requirement", "unified_control"], name="framework_uco_mapping_uniq"
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.coverage == self.Coverage.PARTIAL:
+            required = {"attribute", "operator", "value"}
+            if not isinstance(self.delta_condition, dict) or not required <= set(self.delta_condition):
+                raise ValidationError({"delta_condition": "Partial mappings require attribute, operator and value."})
+        if self.mapping_source == self.Source.AI and not self.approved_by_id:
+            raise ValidationError({"approved_by": "AI-proposed mappings require human approval."})
+
+
+class EvidenceRequirement(TenantScopedModel):
+    unified_control = models.ForeignKey(
+        UnifiedControlObjective, on_delete=models.PROTECT, related_name="evidence_requirements"
+    )
+    artefact_type = models.CharField(max_length=80)
+    required_attributes = models.JSONField(default=list)
+    validity_period_days = models.PositiveIntegerField(null=True, blank=True)
+    sampling_rule = models.JSONField(default=dict, blank=True)
+    acceptance_criteria = models.JSONField(default=dict)
+
+
+class OrganisationControl(TenantScopedModel):
+    class Status(models.TextChoices):
+        NOT_STARTED = "not_started", "Not started"
+        EVIDENCE_SUBMITTED = "evidence_submitted", "Evidence submitted"
+        UNDER_REVIEW = "under_review", "Under review"
+        COMPLIANT = "compliant", "Compliant"
+        PARTIAL = "partially_compliant", "Partially compliant"
+        NONCOMPLIANT = "noncompliant", "Non-compliant"
+        NOT_APPLICABLE = "not_applicable", "Not applicable"
+
+    application = models.ForeignKey(Application, on_delete=models.PROTECT, related_name="organisation_controls")
+    unified_control = models.ForeignKey(
+        UnifiedControlObjective, on_delete=models.PROTECT, related_name="organisation_controls"
+    )
+    applicability = models.CharField(max_length=20, default="applicable")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True)
+    status = models.CharField(max_length=30, choices=Status.choices, default=Status.NOT_STARTED)
+    implementation_score = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    maturity_level = models.DecimalField(max_digits=3, decimal_places=1, default=0)
+    last_reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "application", "unified_control"], name="organisation_control_uniq"
+            )
+        ]
+
+
+class ControlAssignment(TenantScopedModel):
+    organisation_control = models.ForeignKey(OrganisationControl, on_delete=models.PROTECT, related_name="assignments")
+    assignee = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    evidence_scope = models.JSONField(default=list, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "organisation_control", "assignee"], name="control_assignment_uniq"
+            )
+        ]
+
+
+class ControlEvidenceLink(ImmutableTenantRecord):
+    organisation_control = models.ForeignKey(
+        OrganisationControl, on_delete=models.PROTECT, related_name="evidence_links"
+    )
+    evidence = models.ForeignKey(
+        "Evidence", on_delete=models.PROTECT, null=True, blank=True, related_name="control_links"
+    )
+    source_type = models.CharField(max_length=100)
+    source_id = models.UUIDField()
+    source_hash = models.CharField(max_length=64)
+    verdict = models.CharField(max_length=30)
+    confidence = models.PositiveSmallIntegerField(default=5)
+    reason = models.TextField(max_length=4000)
+    mapping_version = models.CharField(max_length=80)
+    system_generated = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "organisation_control", "source_type", "source_id"],
+                name="control_evidence_source_uniq",
             )
         ]
 
@@ -393,6 +784,19 @@ class Evidence(TenantScopedModel):
     sha256 = models.CharField(max_length=64)
     classification = models.CharField(max_length=80)
     immutable = models.BooleanField(default=True)
+    evidence_version = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, default="current")
+    supersedes = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True, related_name="superseded_by"
+    )
+
+    def save(self, *args, **kwargs):
+        if self.pk and Evidence.all_objects.filter(pk=self.pk).exists():
+            raise ValidationError("Evidence is immutable; create a superseding version.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Evidence is immutable.")
 
 
 class AssessmentResponse(TenantScopedModel):
@@ -425,10 +829,24 @@ class AssessmentEvidence(TenantScopedModel):
 
 
 class ComplianceGap(TenantScopedModel):
-    response = models.ForeignKey(AssessmentResponse, on_delete=models.PROTECT)
+    response = models.ForeignKey(AssessmentResponse, on_delete=models.PROTECT, null=True, blank=True)
+    organisation_control = models.ForeignKey(
+        OrganisationControl, on_delete=models.PROTECT, null=True, blank=True, related_name="gaps"
+    )
     description = models.TextField(max_length=8000)
     corrective_action = models.TextField(max_length=8000)
     status = models.CharField(max_length=30, default="open")
+    source_fingerprint = models.CharField(max_length=64, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "source_fingerprint"],
+                condition=models.Q(source_fingerprint__gt=""),
+                name="compliance_gap_fingerprint_uniq",
+            )
+        ]
 
 
 class Risk(TenantScopedModel):
@@ -445,6 +863,13 @@ class RiskLink(TenantScopedModel):
     source_type = models.CharField(max_length=60)
     source_id = models.UUIDField()
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "relationship", "source_type", "source_id"], name="risk_link_source_uniq"
+            )
+        ]
+
 
 class RiskScore(TenantScopedModel):
     risk = models.ForeignKey(Risk, on_delete=models.PROTECT, related_name="scores")
@@ -458,9 +883,98 @@ class RiskScore(TenantScopedModel):
 
 class Remediation(TenantScopedModel):
     risk = models.ForeignKey(Risk, on_delete=models.PROTECT, related_name="remediations")
+    gap = models.ForeignKey(ComplianceGap, on_delete=models.PROTECT, null=True, blank=True, related_name="remediations")
     description = models.TextField(max_length=8000)
     status = models.CharField(max_length=30, default="planned")
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True)
     due_at = models.DateTimeField(null=True, blank=True)
+
+
+class Task(TenantScopedModel):
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        IN_PROGRESS = "in_progress", "In progress"
+        REVIEW = "review", "Review"
+        COMPLETED = "completed", "Completed"
+
+    task_type = models.CharField(max_length=60)
+    title = models.CharField(max_length=300)
+    description = models.TextField(max_length=8000)
+    priority = models.CharField(max_length=20, default="medium")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True)
+    organisation_control = models.ForeignKey(
+        OrganisationControl, on_delete=models.PROTECT, null=True, blank=True, related_name="tasks"
+    )
+    gap = models.ForeignKey(ComplianceGap, on_delete=models.PROTECT, null=True, blank=True, related_name="tasks")
+    risk = models.ForeignKey(Risk, on_delete=models.PROTECT, null=True, blank=True, related_name="tasks")
+    source_type = models.CharField(max_length=100, blank=True)
+    source_id = models.UUIDField(null=True, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "task_type", "source_type", "source_id"],
+                condition=models.Q(source_id__isnull=False),
+                name="task_source_uniq",
+            )
+        ]
+
+
+class AssessmentObservation(ImmutableTenantRecord):
+    assessment = models.ForeignKey(
+        Assessment, on_delete=models.PROTECT, null=True, blank=True, related_name="observations"
+    )
+    organisation_control = models.ForeignKey(OrganisationControl, on_delete=models.PROTECT, related_name="observations")
+    source_type = models.CharField(max_length=100)
+    source_id = models.UUIDField()
+    title = models.CharField(max_length=300)
+    description = models.TextField(max_length=8000)
+    outcome = models.CharField(max_length=30)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "source_type", "source_id"], name="observation_source_uniq")
+        ]
+
+
+class AuditorVerdict(ImmutableTenantRecord):
+    class Decision(models.TextChoices):
+        COMPLIANT = "compliant", "Compliant"
+        PARTIAL = "partially_compliant", "Partially compliant"
+        NONCOMPLIANT = "noncompliant", "Non-compliant"
+        NOT_APPLICABLE = "not_applicable", "Not applicable"
+        QUERY_RAISED = "query_raised", "Query raised"
+
+    # Engagement belongs to the audit-firm tenant while this immutable verdict
+    # belongs to the auditee. A UUID is intentional: the cross-tenant reference
+    # is validated at the access boundary rather than pretending it is a normal
+    # same-tenant foreign key.
+    engagement_id = models.UUIDField()
+    organisation_control = models.ForeignKey(
+        OrganisationControl, on_delete=models.PROTECT, related_name="auditor_verdicts"
+    )
+    decision = models.CharField(max_length=30, choices=Decision.choices)
+    rationale = models.TextField(max_length=8000)
+    evidence_result_id = models.UUIDField(null=True, blank=True)
+    finalized_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    finalized_at = models.DateTimeField(default=timezone.now)
+    locked = models.BooleanField(default=True)
+    supersedes = models.ForeignKey(
+        "self", on_delete=models.PROTECT, null=True, blank=True, related_name="superseded_by"
+    )
+
+    class Meta:
+        indexes = [models.Index(fields=["tenant", "engagement_id", "organisation_control"], name="verdict_scope_idx")]
+
+    def clean(self):
+        # Skip TenantScopedModel's generic relationship check only for the
+        # intentionally cross-tenant engagement UUID; every actual FK here is
+        # still tenant-owned and must match.
+        TenantScopedModel.clean(self)
+        if self.decision == self.Decision.NOT_APPLICABLE and not self.rationale.strip():
+            raise ValidationError({"rationale": "Not-applicable verdicts require justification."})
 
 
 class RiskAcceptance(TenantScopedModel):

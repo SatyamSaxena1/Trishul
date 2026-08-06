@@ -8,17 +8,29 @@ from .models import (
     ArchitectureComponent,
     Assessment,
     AssessmentEvidence,
+    AssessmentObservation,
     AssessmentResponse,
     AuditEvent,
+    AuditorVerdict,
     ComplianceGap,
+    ControlAssignment,
+    ControlEvidenceLink,
     DataFlow,
+    Engagement,
+    EngagementMember,
+    EngagementScope,
+    EngagementStatusHistory,
     Evidence,
+    EvidenceRequirement,
     Finding,
     FindingEvidence,
+    Framework,
+    FrameworkControlMapping,
     FrameworkVersion,
     Job,
     Membership,
     ModelConfiguration,
+    OrganisationControl,
     Organization,
     PromptVersion,
     Remediation,
@@ -32,9 +44,19 @@ from .models import (
     RiskScore,
     Scan,
     ServiceAccount,
+    SubscriptionPlan,
+    Task,
+    Tenant,
+    TenantBranding,
+    TenantEntitlement,
+    TenantInvitation,
+    TenantRelationship,
     TenantScopedModel,
+    TenantSubscription,
     Threat,
     ThreatModel,
+    UnifiedControlObjective,
+    UsageRecord,
     Workspace,
 )
 from .tenancy import current_tenant_id
@@ -78,6 +100,23 @@ OrganizationSerializer = serializer_for(Organization)
 WorkspaceSerializer = serializer_for(Workspace)
 ApplicationSerializer = serializer_for(Application)
 MembershipSerializer = serializer_for(Membership)
+TenantRelationshipSerializer = serializer_for(TenantRelationship)
+SubscriptionPlanSerializer = serializer_for(SubscriptionPlan)
+TenantSubscriptionSerializer = serializer_for(TenantSubscription)
+TenantEntitlementSerializer = serializer_for(TenantEntitlement)
+UsageRecordSerializer = serializer_for(
+    UsageRecord, read_only_fields=tuple(field.name for field in UsageRecord._meta.fields)
+)
+TenantBrandingSerializer = serializer_for(TenantBranding)
+TenantInvitationSerializer = serializer_for(
+    TenantInvitation, read_only_fields=("target_tenant", "invited_by", "accepted_at")
+)
+EngagementSerializer = serializer_for(Engagement, read_only_fields=("created_by", "approved_by"))
+EngagementScopeSerializer = serializer_for(EngagementScope)
+EngagementMemberSerializer = serializer_for(EngagementMember)
+EngagementStatusHistorySerializer = serializer_for(
+    EngagementStatusHistory, read_only_fields=tuple(field.name for field in EngagementStatusHistory._meta.fields)
+)
 RepositorySerializer = serializer_for(Repository)
 RepositoryVersionSerializer = serializer_for(RepositoryVersion, read_only_fields=("immutable",))
 JobSerializer = serializer_for(Job)
@@ -90,6 +129,15 @@ DataFlowSerializer = serializer_for(DataFlow)
 ThreatSerializer = serializer_for(Threat)
 FrameworkVersionSerializer = serializer_for(FrameworkVersion)
 RequirementSerializer = serializer_for(Requirement)
+FrameworkSerializer = serializer_for(Framework)
+UnifiedControlObjectiveSerializer = serializer_for(UnifiedControlObjective)
+FrameworkControlMappingSerializer = serializer_for(FrameworkControlMapping)
+EvidenceRequirementSerializer = serializer_for(EvidenceRequirement)
+OrganisationControlSerializer = serializer_for(OrganisationControl)
+ControlAssignmentSerializer = serializer_for(ControlAssignment)
+ControlEvidenceLinkSerializer = serializer_for(
+    ControlEvidenceLink, read_only_fields=tuple(field.name for field in ControlEvidenceLink._meta.fields)
+)
 AssessmentSerializer = serializer_for(Assessment)
 EvidenceSerializer = serializer_for(Evidence, read_only_fields=("immutable",))
 ComplianceGapSerializer = serializer_for(ComplianceGap)
@@ -97,6 +145,13 @@ AssessmentEvidenceSerializer = serializer_for(AssessmentEvidence)
 RiskSerializer = serializer_for(Risk)
 RiskLinkSerializer = serializer_for(RiskLink)
 RemediationSerializer = serializer_for(Remediation)
+TaskSerializer = serializer_for(Task)
+AssessmentObservationSerializer = serializer_for(
+    AssessmentObservation, read_only_fields=tuple(field.name for field in AssessmentObservation._meta.fields)
+)
+AuditorVerdictSerializer = serializer_for(
+    AuditorVerdict, read_only_fields=tuple(field.name for field in AuditorVerdict._meta.fields)
+)
 RiskAcceptanceSerializer = serializer_for(RiskAcceptance, read_only_fields=("status", "requested_by"))
 ApprovalSerializer = serializer_for(Approval, read_only_fields=("approver",))
 PromptVersionSerializer = serializer_for(PromptVersion)
@@ -157,11 +212,68 @@ class ServiceAccountSerializer(TenantModelSerializer):
         read_only_fields = ("id", "last_used_at", "revoked_at", "created_at")
 
 
+class TenantSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tenant
+        fields = (
+            "id",
+            "slug",
+            "name",
+            "tenant_type",
+            "auditee_mode",
+            "isolation_tier",
+            "is_active",
+            "retention_days",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class AuditFirmOnboardingSerializer(serializers.Serializer):
+    slug = serializers.SlugField(max_length=80)
+    name = serializers.CharField(max_length=200)
+    administrator_email = serializers.EmailField()
+    plan_key = serializers.CharField(max_length=80)
+    plan_version = serializers.CharField(max_length=40, default="1.0")
+    entitlements = serializers.JSONField()
+    trial_days = serializers.IntegerField(min_value=0, max_value=365, default=30)
+
+    def validate_entitlements(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("entitlements must be an object.")
+        return value
+
+
+class AuditeeOnboardingSerializer(serializers.Serializer):
+    slug = serializers.SlugField(max_length=80)
+    name = serializers.CharField(max_length=200)
+    administrator_email = serializers.EmailField()
+    auditee_mode = serializers.ChoiceField(choices=Tenant.AuditeeMode.choices, default=Tenant.AuditeeMode.FIRM_MANAGED)
+
+
+class AuditorVerdictRequestSerializer(serializers.Serializer):
+    organisation_control_id = serializers.UUIDField()
+    decision = serializers.ChoiceField(choices=AuditorVerdict.Decision.choices)
+    rationale = serializers.CharField(max_length=8000)
+    evidence_result_id = serializers.UUIDField(required=False, allow_null=True)
+
+
 SERIALIZERS = {
     Organization: OrganizationSerializer,
     Workspace: WorkspaceSerializer,
     Application: ApplicationSerializer,
     Membership: MembershipSerializer,
+    TenantRelationship: TenantRelationshipSerializer,
+    SubscriptionPlan: SubscriptionPlanSerializer,
+    TenantSubscription: TenantSubscriptionSerializer,
+    TenantEntitlement: TenantEntitlementSerializer,
+    UsageRecord: UsageRecordSerializer,
+    TenantBranding: TenantBrandingSerializer,
+    TenantInvitation: TenantInvitationSerializer,
+    Engagement: EngagementSerializer,
+    EngagementScope: EngagementScopeSerializer,
+    EngagementMember: EngagementMemberSerializer,
+    EngagementStatusHistory: EngagementStatusHistorySerializer,
     Repository: RepositorySerializer,
     RepositoryVersion: RepositoryVersionSerializer,
     Job: JobSerializer,
@@ -174,6 +286,13 @@ SERIALIZERS = {
     Threat: ThreatSerializer,
     FrameworkVersion: FrameworkVersionSerializer,
     Requirement: RequirementSerializer,
+    Framework: FrameworkSerializer,
+    UnifiedControlObjective: UnifiedControlObjectiveSerializer,
+    FrameworkControlMapping: FrameworkControlMappingSerializer,
+    EvidenceRequirement: EvidenceRequirementSerializer,
+    OrganisationControl: OrganisationControlSerializer,
+    ControlAssignment: ControlAssignmentSerializer,
+    ControlEvidenceLink: ControlEvidenceLinkSerializer,
     Assessment: AssessmentSerializer,
     AssessmentResponse: AssessmentResponseSerializer,
     AssessmentEvidence: AssessmentEvidenceSerializer,
@@ -183,6 +302,9 @@ SERIALIZERS = {
     RiskLink: RiskLinkSerializer,
     RiskScore: RiskScoreSerializer,
     Remediation: RemediationSerializer,
+    Task: TaskSerializer,
+    AssessmentObservation: AssessmentObservationSerializer,
+    AuditorVerdict: AuditorVerdictSerializer,
     RiskAcceptance: RiskAcceptanceSerializer,
     Approval: ApprovalSerializer,
     ModelConfiguration: ModelConfigurationSerializer,

@@ -18,6 +18,7 @@ def test_analyzer_job_has_no_token_network_credentials_or_privilege():
     assert "env" not in container and "envFrom" not in container
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
     assert container["securityContext"]["capabilities"] == {"drop": ["ALL"]}
+    assert {"name": "work", "mountPath": "/input", "subPath": "input", "readOnly": True} in container["volumeMounts"]
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Trishul deployment gate client.
+
+Submits a deployment artifact, requests an evaluation, waits for the terminal
+decision, and exits non-zero when the deployment must not proceed. Intended to
+be the command a CI job runs and a branch-protection check observes.
+
+The exit contract is the whole point, so it is explicit:
+
+===  ============================================================
+  0  approved, or approved with follow-up actions
+  1  blocked by policy
+  2  manual review required
+  3  evaluation timeout
+  4  operational, authentication, malformed-response or integrity failure
+===  ============================================================
+
+Depends only on the Python standard library so it runs on any CI image without
+an install step.
+
+Handling of sensitive material: a Terraform plan can contain secret values even
+when the CLI redacts its own output. This client never prints artifact content
+and never writes it to a CI artifact store. Upload the plan directly from the
+job that produced it and let it be deleted with the runner.
+"""
+
+import argparse
+import hashlib
+import json
+import mimetypes
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+EXIT_OK = 0
+EXIT_BLOCKED = 1
+EXIT_REVIEW = 2
+EXIT_TIMEOUT = 3
+EXIT_ERROR = 4
+
+TERMINAL_STATES = {"completed", "failed", "cancelled"}
+DECISION_EXIT = {
+    "approved": EXIT_OK,
+    "approved_with_actions": EXIT_OK,
+    "manual_review": EXIT_REVIEW,
+    "blocked": EXIT_BLOCKED,
+    "error": EXIT_ERROR,
+}
+
+
+class GateError(RuntimeError):
+    """An operational failure. Always fails the gate closed."""
+
+
+class GateTimeout(GateError):
+    """The evaluator did not produce a terminal result before the deadline."""
+
+
+def _request(url, token, *, method="GET", body=None, content_type=None, extra_headers=None, timeout=60):
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    headers.update(extra_headers or {})
+    request = urllib.request.Request(url, data=body, method=method, headers=headers)
+    if not url.startswith("https://") and not os.environ.get("TRISHUL_ALLOW_INSECURE"):
+        raise GateError("Refusing to send a deployment artifact over plaintext HTTP.")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - scheme checked above
+            try:
+                return json.loads(response.read().decode("utf-8") or "{}")
+            except json.JSONDecodeError as exc:
+                raise GateError(f"Malformed JSON response from {method} {url}.") from exc
+    except urllib.error.HTTPError as exc:
+        raise GateError(f"HTTP {exc.code} from {method} {url}.") from exc
+    except urllib.error.URLError as exc:
+        raise GateError(f"Could not reach {url}: {exc.reason}") from exc
+
+
+def _multipart(fields, file_field, filename, payload):
+    """Build a multipart body without pulling in a dependency."""
+    boundary = f"----trishul{uuid.uuid4().hex}"
+    parts = []
+    for name, value in fields.items():
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode()
+        )
+    content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    parts.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; filename=\"{filename}\"\r\n"
+        f"Content-Type: {content_type}\r\n\r\n".encode()
+    )
+    parts.append(payload)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+def submit(base, token, args, payload):
+    fields = {"target": args.target_id, "source_type": args.source_type}
+    if args.commit_sha:
+        fields["source_revision"] = args.commit_sha
+    if args.repository:
+        reference = f"{args.repository}@{args.commit_sha}" if args.commit_sha else args.repository
+        fields["source_reference"] = reference
+    body, content_type = _multipart(fields, "artifact", os.path.basename(args.artifact), payload)
+    return _request(
+        f"{base}/deployment-snapshots/", token, method="POST", body=body, content_type=content_type, timeout=300
+    )
+
+
+def evaluate(base, token, snapshot_id, args):
+    context = {}
+    for key in ("repository", "commit_sha", "pull_request"):
+        value = getattr(args, key, None)
+        if value:
+            context[key] = value
+    body = json.dumps({"trigger": args.trigger, "context": context}).encode()
+    headers = {"Idempotency-Key": args.idempotency_key} if args.idempotency_key else {}
+    return _request(
+        f"{base}/deployment-snapshots/{snapshot_id}/evaluations/",
+        token,
+        method="POST",
+        body=body,
+        content_type="application/json",
+        extra_headers=headers,
+    )
+
+
+def await_decision(base, token, run_id, *, timeout, interval):
+    """Poll until the run reaches a terminal state or the deadline passes.
+
+    A timeout is an operational failure, never an approval.
+    """
+    deadline = time.monotonic() + timeout
+    state = "queued"
+    while time.monotonic() < deadline:
+        run = _request(f"{base}/evaluation-runs/{run_id}/", token)
+        state = run.get("state", "unknown")
+        if state in TERMINAL_STATES:
+            if state != "completed":
+                raise GateError(f"Evaluation ended in state {state!r} (error_code={run.get('error_code') or 'none'}).")
+            return _request(f"{base}/evaluation-runs/{run_id}/decision/", token)
+        time.sleep(interval)
+    raise GateTimeout(f"Timed out after {timeout}s waiting for the evaluation; last state was {state!r}.")
+
+
+def validate_decision(decision):
+    if not isinstance(decision, dict) or decision.get("decision") not in DECISION_EXIT:
+        raise GateError("Malformed or unknown deployment decision.")
+    digest = decision.get("decision_hash", "")
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest.lower()):
+        raise GateError("The deployment decision has no valid integrity hash.")
+    if decision.get("integrity_verified") is not True:
+        raise GateError("The deployment decision integrity check failed.")
+
+
+def report(decision, *, base, token, run_id):
+    summary = decision.get("counts", {})
+    print(f"Decision:   {decision['decision']}")
+    print(f"Risk score: {decision.get('risk_score')}  Compliance: {decision.get('compliance_score')}%")
+    print(f"Reasons:    {', '.join(decision.get('reason_codes', [])) or 'none'}")
+    print(
+        "Controls:   "
+        + "  ".join(f"{name}={count}" for name, count in sorted(summary.items()) if isinstance(count, int))
+    )
+    if DECISION_EXIT.get(decision["decision"], EXIT_ERROR) == EXIT_OK:
+        return
+    try:
+        failures = _request(f"{base}/evaluation-runs/{run_id}/results/?outcome=fail", token)
+    except GateError:
+        return
+    rows = failures.get("results", [])
+    if rows:
+        print("\nFailing controls:")
+        for row in rows[:50]:
+            identifier = row.get("fingerprint") or row.get("id") or "unknown"
+            print(f"  [{row['reason_code']}] {row['resource_type']} result={identifier}")
+        if len(rows) > 50:
+            print(f"  … and {len(rows) - 50} more.")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Evaluate a deployment artifact against Trishul policy.")
+    parser.add_argument("--base-url", default=os.environ.get("TRISHUL_URL", ""), help="Trishul base URL.")
+    parser.add_argument("--target-id", default=os.environ.get("TRISHUL_TARGET_ID", ""), help="Deployment target UUID.")
+    parser.add_argument("--artifact", required=True, help="Path to the plan, manifest or inventory file.")
+    parser.add_argument(
+        "--source-type",
+        default="terraform_plan",
+        choices=["terraform_plan", "kubernetes_manifest", "compose_file", "server_inventory", "cloud_inventory"],
+    )
+    parser.add_argument("--trigger", default="pull_request")
+    parser.add_argument("--repository", default=os.environ.get("GITHUB_REPOSITORY", ""))
+    parser.add_argument("--commit-sha", default=os.environ.get("GITHUB_SHA", ""))
+    parser.add_argument("--pull-request", default="")
+    parser.add_argument("--idempotency-key", default="")
+    parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--actions-require-review",
+        action="store_true",
+        help="Exit 2 for approved_with_actions instead of allowing deployment.",
+    )
+    parser.add_argument(
+        "--warn-only",
+        action="store_true",
+        help="Report the decision but always exit 0. For shadow-mode rollout before enforcement.",
+    )
+    args = parser.parse_args(argv)
+
+    token = os.environ.get("TRISHUL_TOKEN", "")
+    if not (args.base_url and args.target_id and token):
+        print("TRISHUL_URL, TRISHUL_TARGET_ID and TRISHUL_TOKEN must all be set.", file=sys.stderr)
+        return EXIT_ERROR
+    base = f"{args.base_url.rstrip('/')}/api/v1/assurance"
+
+    try:
+        with open(args.artifact, "rb") as handle:
+            payload = handle.read()
+        # Printed so an operator can correlate the CI run with stored evidence.
+        # The artifact itself is never echoed.
+        print(f"Artifact:   {os.path.basename(args.artifact)} ({len(payload)} bytes, "
+              f"sha256={hashlib.sha256(payload).hexdigest()})")
+
+        snapshot = submit(base, token, args, payload)
+        accepted = evaluate(base, token, snapshot["id"], args)
+        run_id = accepted["evaluation_run_id"]
+        print(f"Evaluation: {run_id} (correlation {accepted.get('correlation_id')})")
+
+        decision = await_decision(base, token, run_id, timeout=args.timeout_seconds, interval=args.poll_seconds)
+        validate_decision(decision)
+        report(decision, base=base, token=token, run_id=run_id)
+        code = DECISION_EXIT.get(decision["decision"], EXIT_ERROR)
+        if args.actions_require_review and decision["decision"] == "approved_with_actions":
+            code = EXIT_REVIEW
+    except GateTimeout as exc:
+        print(f"Deployment gate timed out: {exc}", file=sys.stderr)
+        code = EXIT_TIMEOUT
+    except GateError as exc:
+        print(f"Deployment gate failed: {exc}", file=sys.stderr)
+        code = EXIT_ERROR
+    except OSError as exc:
+        print(f"Could not read artifact: {exc}", file=sys.stderr)
+        code = EXIT_ERROR
+
+    if args.warn_only and code != EXIT_OK:
+        print(f"\nwarn-only: exit code {code} suppressed. Remove --warn-only to enforce.", file=sys.stderr)
+        return EXIT_OK
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

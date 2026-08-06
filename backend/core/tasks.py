@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from .models import AuditEvent, Finding, FindingEvidence, Job, RiskAcceptance, Scan, Tenant
 from .runner import analyze
-from .tenancy import tenant_context
+from .tenancy import database_tenant_context, tenant_context
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,11 @@ def _database_tenant(tenant_id):
 
 @shared_task(name="core.tasks.execute_scan", acks_late=True)
 def execute_scan(tenant_id, scan_id):
+    with database_tenant_context(tenant_id):
+        return _execute_scan(tenant_id, scan_id)
+
+
+def _execute_scan(tenant_id, scan_id):
     with transaction.atomic(), tenant_context(tenant_id):
         _database_tenant(tenant_id)
         scan = Scan.objects.select_for_update().select_related("repository_version").get(pk=scan_id)
@@ -89,8 +94,7 @@ def execute_scan(tenant_id, scan_id):
 def reconcile_jobs():
     now = timezone.now()
     for tenant_id in Tenant.objects.filter(is_active=True).values_list("id", flat=True).iterator():
-        with transaction.atomic(), tenant_context(tenant_id):
-            _database_tenant(tenant_id)
+        with database_tenant_context(tenant_id), transaction.atomic():
             stale = Job.objects.filter(state=Job.State.RUNNING, lease_expires_at__lt=now)
             for job in stale.select_for_update():
                 job.state = Job.State.QUEUED if job.attempts < 3 else Job.State.FAILED
@@ -103,6 +107,5 @@ def reconcile_jobs():
 def expire_acceptances():
     now = timezone.now()
     for tenant_id in Tenant.objects.filter(is_active=True).values_list("id", flat=True).iterator():
-        with transaction.atomic(), tenant_context(tenant_id):
-            _database_tenant(tenant_id)
+        with database_tenant_context(tenant_id), transaction.atomic():
             RiskAcceptance.objects.filter(status="approved", expires_at__lte=now).update(status="expired")

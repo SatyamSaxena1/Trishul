@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "core",
+    "deployment_assurance",
 ]
 
 MIDDLEWARE = [
@@ -132,7 +133,16 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BEAT_SCHEDULE = {
     "reconcile-jobs": {"task": "core.tasks.reconcile_jobs", "schedule": 60.0},
     "expire-acceptances": {"task": "core.tasks.expire_acceptances", "schedule": 3600.0},
+    "reconcile-evaluations": {"task": "deployment_assurance.tasks.reconcile_evaluations", "schedule": 60.0},
+    "expire-waivers": {"task": "deployment_assurance.tasks.expire_waivers", "schedule": 900.0},
 }
+
+# Deployment Assurance reuses the existing analysis-controller queue and its
+# isolated runtime; no second privileged worker or queue is introduced.
+ASSURANCE_EVALUATION_LEASE_SECONDS = int(os.getenv("ASSURANCE_EVALUATION_LEASE_SECONDS", "1800"))
+ASSURANCE_MAX_EVALUATION_ATTEMPTS = int(os.getenv("ASSURANCE_MAX_EVALUATION_ATTEMPTS", "3"))
+ASSURANCE_EVIDENCE_RETENTION_CLASS = os.getenv("ASSURANCE_EVIDENCE_RETENTION_CLASS", "deployment-evidence-default")
+ASSURANCE_ALLOW_IN_PROCESS_NORMALIZATION = False
 
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "")
 S3_REGION = os.getenv("S3_REGION", "us-east-1")

@@ -13,17 +13,22 @@ def validate_url(url: str) -> None:
         raise ValueError("Transfer URL must be a credential-free HTTPS authority")
 
 
-def download(url: str, path: str, maximum: int) -> None:
+def download(url: str, path: str, maximum: int, output_directory: str | None = None) -> None:
     validate_url(url)
     total = 0
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if output_directory:
+        Path(output_directory).mkdir(parents=True, exist_ok=True)
     with httpx.stream("GET", url, follow_redirects=False, timeout=120) as response:
         response.raise_for_status()
-        with Path(path).open("xb") as output:
+        with destination.open("xb") as output:
             for chunk in response.iter_bytes(CHUNK_SIZE):
                 total += len(chunk)
                 if total > maximum:
                     raise ValueError("Transfer exceeds configured limit")
                 output.write(chunk)
+    destination.chmod(0o444)
 
 
 def upload(url: str, path: str, maximum: int) -> None:
@@ -42,10 +47,13 @@ def main():
     parser.add_argument("url")
     parser.add_argument("path")
     parser.add_argument("--maximum", type=int, required=True)
+    parser.add_argument("--output-directory")
     arguments = parser.parse_args()
-    globals()[arguments.operation](arguments.url, arguments.path, arguments.maximum)
+    if arguments.operation == "download":
+        download(arguments.url, arguments.path, arguments.maximum, arguments.output_directory)
+    else:
+        upload(arguments.url, arguments.path, arguments.maximum)
 
 
 if __name__ == "__main__":
     main()
-

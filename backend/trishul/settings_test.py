@@ -6,3 +6,5 @@ for name in ("DATABASE_URL", "DATABASE_URL_FILE", "DB_HOST", "DB_USER", "DB_PASS
     os.environ.pop(name, None)
 
 from .settings import *  # noqa: F403
+
+ASSURANCE_ALLOW_IN_PROCESS_NORMALIZATION = True

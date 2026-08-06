@@ -18,13 +18,71 @@ logger = logging.getLogger(__name__)
 
 ROLE_PERMISSIONS = {
     "admin": {"*"},
+    "platform_admin": {
+        "platform.manage",
+        "tenant.read",
+        "subscription.read",
+        "subscription.manage",
+        "usage.read",
+        "audit.read",
+    },
+    "firm_admin": {
+        "tenant.manage",
+        "membership.manage",
+        "membership.read",
+        "branding.read",
+        "branding.manage",
+        "engagement.read",
+        "engagement.manage",
+        "subscription.read",
+        "usage.read",
+        "audit.read",
+    },
+    "audit_manager": {
+        "tenant.read",
+        "engagement.read",
+        "engagement.manage",
+        "engagement.review",
+        "usage.read",
+        "audit.read",
+    },
+    "reviewer": {"engagement.read", "engagement.review", "audit.read"},
+    "org_admin": {
+        "tenant.manage",
+        "membership.manage",
+        "application.read",
+        "application.write",
+        "control.read",
+        "evidence.read",
+        "subscription.read",
+        "usage.read",
+        "audit.read",
+    },
+    "compliance_manager": {
+        "application.read",
+        "application.write",
+        "control.read",
+        "control.manage",
+        "assessment.read",
+        "assessment.write",
+        "evidence.read",
+        "risk.read",
+        "task.read",
+        "task.manage",
+        "usage.read",
+    },
+    "control_owner": {"control.assigned", "evidence.assigned", "task.assigned"},
+    "risk_owner": {"risk.read", "risk.accept", "task.read", "task.manage"},
+    "vendor_manager": {"vendor.manage", "risk.read", "evidence.read", "task.read", "task.manage"},
     "ciso": {
         "application.read",
+        "control.read",
         "finding.read",
         "evidence.read",
         "threat_model.read",
         "assessment.read",
         "risk.read",
+        "task.read",
         "risk.accept",
         "approval.decide",
         "report.create",
@@ -78,9 +136,31 @@ ROLE_PERMISSIONS = {
         "report.read",
         "audit.read",
         "audit.export",
+        "engagement.read",
+        "engagement.review",
+        "engagement.verdict",
     },
     "executive": {"application.read", "risk.read", "report.read"},
 }
+
+
+def _extend_role_permissions():
+    """Fold optional module permission grants into the role table.
+
+    Modules own their own permission vocabulary; ``core`` owns the role mapping.
+    Importing lazily keeps ``core`` free of a hard dependency on a module that a
+    given deployment may not install.
+    """
+    try:
+        from deployment_assurance.permissions import ROLE_GRANTS
+    except ImportError:  # pragma: no cover - module not installed
+        return
+    for role, granted in ROLE_GRANTS.items():
+        if role in ROLE_PERMISSIONS and "*" not in ROLE_PERMISSIONS[role]:
+            ROLE_PERMISSIONS[role] = ROLE_PERMISSIONS[role] | set(granted)
+
+
+_extend_role_permissions()
 
 
 @dataclass

@@ -7,7 +7,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from core.models import Application, AuditEvent, Membership, Organization, Repository, ServiceAccount, Tenant, Workspace
-from core.tenancy import tenant_context
+from core.tenancy import current_tenant_id, database_tenant_context, tenant_context
 
 
 def make_application(tenant, name):
@@ -106,3 +106,14 @@ def test_application_restrictions_apply_to_lists_and_writes():
     )
     assert response.status_code == 403
     assert Repository.all_objects.filter(name="forbidden").count() == 0
+
+
+def test_worker_tenant_context_is_cleared_after_success_and_failure():
+    tenant_id = __import__("uuid").uuid4()
+    with database_tenant_context(tenant_id):
+        assert current_tenant_id() == tenant_id
+    assert current_tenant_id() is None
+    with pytest.raises(RuntimeError):
+        with database_tenant_context(tenant_id):
+            raise RuntimeError("worker failed")
+    assert current_tenant_id() is None

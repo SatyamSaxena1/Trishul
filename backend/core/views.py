@@ -10,7 +10,7 @@ from datetime import timedelta
 import httpx
 import redis
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import connection, models, transaction
 from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
@@ -22,6 +22,7 @@ from rest_framework.response import Response
 
 from .ai_gateway import GatewayPolicyError, invoke
 from .archive import UnsafeArchive, inspect_archive
+from .entitlements import EntitlementDenied, enforce, record_usage
 from .models import (
     AIAnalysisRun,
     Application,
@@ -29,17 +30,30 @@ from .models import (
     ArchitectureComponent,
     Assessment,
     AssessmentEvidence,
+    AssessmentObservation,
     AssessmentResponse,
     AuditEvent,
+    AuditorVerdict,
     ComplianceGap,
+    ControlAssignment,
+    ControlEvidenceLink,
+    CrossTenantAccessEvent,
     DataFlow,
+    Engagement,
+    EngagementMember,
+    EngagementScope,
+    EngagementStatusHistory,
     Evidence,
+    EvidenceRequirement,
     Finding,
     FindingEvidence,
+    Framework,
+    FrameworkControlMapping,
     FrameworkVersion,
     Job,
     Membership,
     ModelConfiguration,
+    OrganisationControl,
     Organization,
     PromptVersion,
     Remediation,
@@ -53,15 +67,32 @@ from .models import (
     RiskScore,
     Scan,
     ServiceAccount,
+    SubscriptionPlan,
+    Task,
+    Tenant,
+    TenantBranding,
+    TenantEntitlement,
+    TenantInvitation,
+    TenantRelationship,
+    TenantSubscription,
     Threat,
     ThreatModel,
+    UnifiedControlObjective,
+    UsageRecord,
     Workspace,
 )
 from .risk import FORMULA_VERSION, calculate
 from .security import ServicePrincipal, has_permission, principal_permissions, resolve_tenant
-from .serializers import SERIALIZERS
+from .serializers import (
+    SERIALIZERS,
+    AuditeeOnboardingSerializer,
+    AuditFirmOnboardingSerializer,
+    AuditorVerdictRequestSerializer,
+    TenantSummarySerializer,
+)
 from .storage import healthcheck as storage_healthcheck
 from .storage import put_file
+from .tenancy import engagement_target_context, tenant_context
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +114,17 @@ PERMISSION_PREFIX = {
     Workspace: "tenant",
     Application: "application",
     Membership: "membership",
+    TenantRelationship: "engagement",
+    SubscriptionPlan: "subscription",
+    TenantSubscription: "subscription",
+    TenantEntitlement: "subscription",
+    UsageRecord: "usage",
+    TenantBranding: "branding",
+    TenantInvitation: "membership",
+    Engagement: "engagement",
+    EngagementScope: "engagement",
+    EngagementMember: "engagement",
+    EngagementStatusHistory: "engagement",
     Repository: "repository",
     RepositoryVersion: "repository",
     Job: "scan",
@@ -95,6 +137,13 @@ PERMISSION_PREFIX = {
     Threat: "threat_model",
     FrameworkVersion: "assessment",
     Requirement: "assessment",
+    Framework: "control",
+    UnifiedControlObjective: "control",
+    FrameworkControlMapping: "control",
+    EvidenceRequirement: "control",
+    OrganisationControl: "control",
+    ControlAssignment: "control",
+    ControlEvidenceLink: "evidence",
     Assessment: "assessment",
     AssessmentResponse: "assessment",
     AssessmentEvidence: "evidence",
@@ -104,6 +153,9 @@ PERMISSION_PREFIX = {
     RiskLink: "risk",
     RiskScore: "risk",
     Remediation: "finding",
+    Task: "task",
+    AssessmentObservation: "assessment",
+    AuditorVerdict: "engagement",
     RiskAcceptance: "risk",
     Approval: "approval",
     ModelConfiguration: "policy",
@@ -127,6 +179,9 @@ APPLICATION_PATH = {
     DataFlow: "threat_model__application_id",
     Threat: "threat_model__application_id",
     Assessment: "application_id",
+    OrganisationControl: "application_id",
+    ControlAssignment: "organisation_control__application_id",
+    ControlEvidenceLink: "organisation_control__application_id",
     Evidence: "assessment__application_id",
     AssessmentResponse: "assessment__application_id",
     AssessmentEvidence: "response__assessment__application_id",
@@ -135,6 +190,9 @@ APPLICATION_PATH = {
     RiskLink: "risk__application_id",
     RiskScore: "risk__application_id",
     Remediation: "risk__application_id",
+    Task: "organisation_control__application_id",
+    AssessmentObservation: "organisation_control__application_id",
+    AuditorVerdict: "organisation_control__application_id",
     RiskAcceptance: "risk__application_id",
     Approval: "acceptance__risk__application_id",
     Report: "application_id",
@@ -156,6 +214,12 @@ WRITE_PERMISSION = {
     "report": "report.create",
     "service_account": "service_account.manage",
     "audit": "audit.read",
+    "subscription": "subscription.manage",
+    "usage": "usage.read",
+    "branding": "branding.manage",
+    "engagement": "engagement.manage",
+    "control": "control.manage",
+    "task": "task.manage",
 }
 
 
@@ -445,6 +509,575 @@ class AssessmentResponseViewSet(viewset_for(AssessmentResponse)):
         super().perform_update(serializer)
 
 
+def _install_subscription(*, tenant, plan_key, plan_version, entitlements, trial_days=0):
+    now = timezone.now()
+    TenantSubscription.all_objects.create(
+        tenant=tenant,
+        plan_key=plan_key,
+        plan_version=plan_version,
+        entitlement_snapshot=entitlements,
+        state=TenantSubscription.State.TRIAL if trial_days else TenantSubscription.State.ACTIVE,
+        trial_started_at=now if trial_days else None,
+        trial_ends_at=now + timedelta(days=trial_days) if trial_days else None,
+    )
+    for code, value in entitlements.items():
+        TenantEntitlement.all_objects.create(
+            tenant=tenant,
+            code=code,
+            enabled=value is not False,
+            limit=value if isinstance(value, int) and not isinstance(value, bool) else None,
+            configuration={"allow": value} if isinstance(value, list) else (value if isinstance(value, dict) else {}),
+        )
+
+
+def readonly_viewset_for(model):
+    return type(
+        f"{model.__name__}ReadOnlyViewSet",
+        (TenantModelViewSet,),
+        {
+            "model": model,
+            "serializer_class": SERIALIZERS[model],
+            "immutable": True,
+            "http_method_names": ["get", "head", "options"],
+        },
+    )
+
+
+class TenantAdminViewSet(viewsets.ViewSet):
+    """Narrow platform-admin path for audit-firm onboarding."""
+
+    def perform_authentication(self, request):
+        super().perform_authentication(request)
+        if not hasattr(request, "tenant"):
+            resolve_tenant(request)
+
+    def check_permissions(self, request):
+        super().check_permissions(request)
+        if request.tenant.tenant_type != Tenant.Type.PLATFORM or not has_permission(request, "platform.manage"):
+            raise exceptions.PermissionDenied("A platform administrator is required.")
+
+    def list(self, request):
+        firms = Tenant.objects.filter(tenant_type=Tenant.Type.AUDIT_FIRM).order_by("name")
+        return Response(TenantSummarySerializer(firms, many=True).data)
+
+    def create(self, request):
+        serializer = AuditFirmOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        if Tenant.objects.filter(slug=data["slug"]).exists():
+            raise exceptions.ValidationError({"slug": "This tenant slug already exists."})
+        with transaction.atomic():
+            plan, created = SubscriptionPlan.all_objects.get_or_create(
+                tenant=request.tenant,
+                key=data["plan_key"],
+                plan_version=data["plan_version"],
+                defaults={"name": data["plan_key"].replace("-", " ").title(), "entitlements": data["entitlements"]},
+            )
+            if not created and plan.entitlements != data["entitlements"]:
+                raise exceptions.ValidationError({"entitlements": "The plan version already has different terms."})
+            firm = Tenant.objects.create(
+                slug=data["slug"],
+                name=data["name"],
+                tenant_type=Tenant.Type.AUDIT_FIRM,
+                isolation_tier=Tenant.IsolationTier.SHARED,
+            )
+            with tenant_context(firm.id):
+                _install_subscription(
+                    tenant=firm,
+                    plan_key=plan.key,
+                    plan_version=plan.plan_version,
+                    entitlements=data["entitlements"],
+                    trial_days=data["trial_days"],
+                )
+            TenantInvitation.all_objects.create(
+                tenant=request.tenant,
+                target_tenant=firm,
+                email=data["administrator_email"],
+                role=Membership.Role.FIRM_ADMIN,
+                invited_by=request.user,
+                expires_at=timezone.now() + timedelta(days=7),
+            )
+            AuditEvent.append(
+                tenant=request.tenant,
+                actor_type="user",
+                actor_id=str(request.user.id),
+                action="tenant.audit_firm.created",
+                resource_type="core.tenant",
+                resource_id=firm.id,
+                details={"plan": f"{plan.key}@{plan.plan_version}", "isolation_tier": firm.isolation_tier},
+            )
+        return Response(TenantSummarySerializer(firm).data, status=status.HTTP_201_CREATED)
+
+
+class OrganisationControlViewSet(viewset_for(OrganisationControl)):
+    def get_required_permission(self):
+        if self.request.membership.role == Membership.Role.CONTROL_OWNER:
+            return "control.assigned"
+        return super().get_required_permission()
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.request.membership.role == Membership.Role.CONTROL_OWNER:
+            return queryset.filter(
+                assignments__assignee=self.request.user,
+                assignments__is_active=True,
+            ).filter(
+                models.Q(assignments__expires_at__isnull=True) | models.Q(assignments__expires_at__gt=timezone.now())
+            )
+        return queryset
+
+
+class TaskViewSet(viewset_for(Task)):
+    def get_required_permission(self):
+        if self.request.membership.role == Membership.Role.CONTROL_OWNER:
+            return "task.assigned"
+        return super().get_required_permission()
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.request.membership.role == Membership.Role.CONTROL_OWNER:
+            return queryset.filter(owner=self.request.user)
+        return queryset
+
+
+class EngagementMemberViewSet(viewset_for(EngagementMember)):
+    def perform_create(self, serializer):
+        user = serializer.validated_data["user"]
+        if not Membership.all_objects.filter(tenant=self.request.tenant, user=user, is_active=True).exists():
+            raise exceptions.ValidationError({"user": "The auditor must be an active firm member."})
+        current = EngagementMember.objects.filter(is_active=True).values("user_id").distinct().count()
+        try:
+            enforce(self.request.tenant, "auditor_seats", current_usage=current)
+        except EntitlementDenied as exc:
+            raise exceptions.PermissionDenied(str(exc)) from exc
+        super().perform_create(serializer)
+
+
+class MembershipViewSet(viewset_for(Membership)):
+    def _record_active_users(self, instance):
+        record_usage(
+            self.request.tenant,
+            "active_users",
+            Membership.objects.filter(is_active=True).count(),
+            source_type="core.membership",
+            source_id=instance.id,
+            idempotency_key=f"active-users:{instance.id}:v{instance.version}",
+        )
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        self._record_active_users(serializer.instance)
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        self._record_active_users(serializer.instance)
+
+
+class TenantInvitationViewSet(viewset_for(TenantInvitation)):
+    def perform_create(self, serializer):
+        if isinstance(self.request.user, ServicePrincipal):
+            raise exceptions.PermissionDenied("A human administrator must invite users.")
+        expires_at = serializer.validated_data["expires_at"]
+        if not timezone.now() < expires_at <= timezone.now() + timedelta(days=30):
+            raise exceptions.ValidationError({"expires_at": "Invitations must expire within 30 days."})
+        roles = {
+            Tenant.Type.AUDIT_FIRM: {
+                Membership.Role.FIRM_ADMIN,
+                Membership.Role.AUDIT_MANAGER,
+                Membership.Role.AUDITOR,
+                Membership.Role.REVIEWER,
+            },
+            Tenant.Type.AUDITEE: {
+                Membership.Role.ORG_ADMIN,
+                Membership.Role.COMPLIANCE_MANAGER,
+                Membership.Role.CONTROL_OWNER,
+                Membership.Role.RISK_OWNER,
+                Membership.Role.VENDOR_MANAGER,
+                Membership.Role.CISO,
+            },
+        }
+        if serializer.validated_data["role"] not in roles.get(self.request.tenant.tenant_type, set()):
+            raise exceptions.ValidationError({"role": "This role is not valid for the tenant type."})
+        invitation = serializer.save(
+            tenant=self.request.tenant,
+            target_tenant=self.request.tenant,
+            invited_by=self.request.user,
+        )
+        self._audit("membership.invited", invitation)
+
+
+class EngagementViewSet(viewset_for(Engagement)):
+    def get_required_permission(self):
+        if self.action in {"assurance_results"}:
+            return "engagement.review"
+        if self.action == "verdicts":
+            return "engagement.review"
+        return "engagement.read" if self.request.method in {"GET", "HEAD", "OPTIONS"} else "engagement.manage"
+
+    def perform_create(self, serializer):
+        auditee = serializer.validated_data["auditee_tenant"]
+        if auditee.tenant_type != Tenant.Type.AUDITEE:
+            raise exceptions.ValidationError({"auditee_tenant": "An auditee tenant is required."})
+        if not TenantRelationship.objects.filter(related_tenant=auditee, status="active").exists():
+            raise exceptions.ValidationError(
+                {"auditee_tenant": "Create or link the auditee relationship before opening an engagement."}
+            )
+        for framework in serializer.validated_data.get("framework_scope", []):
+            try:
+                enforce(self.request.tenant, "frameworks", item=framework)
+            except EntitlementDenied as exc:
+                raise exceptions.PermissionDenied(str(exc)) from exc
+        active = serializer.validated_data.get("status") == Engagement.Status.ACTIVE
+        engagement = serializer.save(
+            tenant=self.request.tenant,
+            created_by=self.request.user,
+            approved_by=self.request.user if active else None,
+        )
+        EngagementStatusHistory.all_objects.create(
+            tenant=self.request.tenant,
+            engagement=engagement,
+            to_status=engagement.status,
+            actor=self.request.user,
+        )
+        self._audit("engagement.created", engagement)
+
+    def perform_update(self, serializer):
+        previous = serializer.instance.status
+        next_status = serializer.validated_data.get("status", previous)
+        if next_status in {Engagement.Status.CLOSED, Engagement.Status.REVOKED} and not serializer.validated_data.get(
+            "closed_reason", serializer.instance.closed_reason
+        ):
+            raise exceptions.ValidationError({"closed_reason": "Closing or revoking requires a reason."})
+        super().perform_update(serializer)
+        if next_status != previous:
+            EngagementStatusHistory.all_objects.create(
+                tenant=self.request.tenant,
+                engagement=serializer.instance,
+                from_status=previous,
+                to_status=next_status,
+                reason=serializer.instance.closed_reason,
+                actor=self.request.user,
+            )
+
+    @action(detail=False, methods=["post"], url_path="onboard-auditee")
+    def onboard_auditee(self, request):
+        serializer = AuditeeOnboardingSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        current = TenantRelationship.objects.filter(
+            relationship=TenantRelationship.Relationship.MANAGES, status="active"
+        ).count()
+        try:
+            enforce(request.tenant, "auditee_organisations", current_usage=current)
+        except EntitlementDenied as exc:
+            raise exceptions.PermissionDenied(str(exc)) from exc
+        if Tenant.objects.filter(slug=data["slug"]).exists():
+            raise exceptions.ValidationError({"slug": "This tenant slug already exists."})
+        subscription = TenantSubscription.objects.order_by("-created_at").first()
+        with transaction.atomic():
+            auditee = Tenant.objects.create(
+                slug=data["slug"],
+                name=data["name"],
+                tenant_type=Tenant.Type.AUDITEE,
+                auditee_mode=data["auditee_mode"],
+            )
+            TenantRelationship.all_objects.create(
+                tenant=request.tenant,
+                related_tenant=auditee,
+                relationship=TenantRelationship.Relationship.MANAGES,
+            )
+            record_usage(
+                request.tenant,
+                "active_auditee_organisations",
+                1,
+                source_type="core.tenant",
+                source_id=auditee.id,
+                idempotency_key=f"auditee:{auditee.id}",
+            )
+            TenantInvitation.all_objects.create(
+                tenant=request.tenant,
+                target_tenant=auditee,
+                email=data["administrator_email"],
+                role=Membership.Role.ORG_ADMIN,
+                invited_by=request.user,
+                expires_at=timezone.now() + timedelta(days=7),
+            )
+            if subscription:
+                with tenant_context(auditee.id):
+                    _install_subscription(
+                        tenant=auditee,
+                        plan_key=subscription.plan_key,
+                        plan_version=subscription.plan_version,
+                        entitlements=subscription.entitlement_snapshot,
+                    )
+            with tenant_context(auditee.id):
+                organization = Organization.all_objects.create(tenant=auditee, name=auditee.name)
+                Workspace.all_objects.create(tenant=auditee, organization=organization, name="Default")
+            AuditEvent.append(
+                tenant=request.tenant,
+                actor_type="user",
+                actor_id=str(request.user.id),
+                action="tenant.auditee.created",
+                resource_type="core.tenant",
+                resource_id=auditee.id,
+                details={"mode": auditee.auditee_mode},
+            )
+        return Response(TenantSummarySerializer(auditee).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], url_path="link-auditee")
+    def link_auditee(self, request):
+        try:
+            auditee = Tenant.objects.get(pk=uuid.UUID(str(request.data["auditee_tenant_id"])))
+        except (KeyError, ValueError, Tenant.DoesNotExist) as exc:
+            raise exceptions.ValidationError({"auditee_tenant_id": "A valid auditee tenant is required."}) from exc
+        if auditee.tenant_type != Tenant.Type.AUDITEE:
+            raise exceptions.ValidationError({"auditee_tenant_id": "An auditee tenant is required."})
+        current = TenantRelationship.objects.filter(
+            relationship=TenantRelationship.Relationship.MANAGES, status="active"
+        ).count()
+        if not TenantRelationship.objects.filter(related_tenant=auditee, status="active").exists():
+            try:
+                enforce(request.tenant, "auditee_organisations", current_usage=current)
+            except EntitlementDenied as exc:
+                raise exceptions.PermissionDenied(str(exc)) from exc
+        relationship, _ = TenantRelationship.objects.get_or_create(
+            tenant=request.tenant,
+            related_tenant=auditee,
+            relationship=TenantRelationship.Relationship.CLIENT,
+            defaults={"status": "active"},
+        )
+        record_usage(
+            request.tenant,
+            "active_auditee_organisations",
+            1,
+            source_type="core.tenantrelationship",
+            source_id=relationship.id,
+            idempotency_key=f"auditee:{auditee.id}",
+        )
+        return Response(SERIALIZERS[TenantRelationship](relationship).data, status=status.HTTP_201_CREATED)
+
+    def _access(self, engagement, *, action_name, object_type, object_id="", write=False):
+        reason = "active_scoped_engagement"
+        allowed = engagement.is_live()
+        member = None
+        if allowed and self.request.membership.role not in {Membership.Role.FIRM_ADMIN, Membership.Role.AUDIT_MANAGER}:
+            member = EngagementMember.objects.filter(
+                engagement=engagement, user=self.request.user, is_active=True
+            ).first()
+            allowed = member is not None and not (write and member.role == EngagementMember.Role.REVIEWER)
+            if not member:
+                reason = "auditor_not_assigned"
+            elif write and member.role == EngagementMember.Role.REVIEWER:
+                reason = "reviewer_is_read_only"
+        elif not allowed:
+            reason = "engagement_not_active_or_outside_dates"
+        CrossTenantAccessEvent.all_objects.create(
+            tenant=self.request.tenant,
+            target_tenant=engagement.auditee_tenant,
+            engagement=engagement,
+            subject_id=str(self.request.user.id),
+            object_type=object_type,
+            object_id=str(object_id),
+            action=action_name,
+            decision="allow" if allowed else "deny",
+            reason=reason,
+        )
+        return allowed
+
+    def _scope_access(self, engagement, *, action_name, object_type, object_id, allowed):
+        # The ORM context points at the auditee while this audit row belongs to
+        # the firm. PostgreSQL retains the request's firm tenant GUC.
+        with tenant_context(self.request.tenant.id):
+            CrossTenantAccessEvent.all_objects.create(
+                tenant=self.request.tenant,
+                target_tenant=engagement.auditee_tenant,
+                engagement=engagement,
+                subject_id=str(self.request.user.id),
+                object_type=object_type,
+                object_id=str(object_id),
+                action=action_name,
+                decision="allow" if allowed else "deny",
+                reason="active_scoped_engagement" if allowed else "object_outside_engagement_scope",
+            )
+        return allowed
+
+    @staticmethod
+    def _access_denied(detail="The engagement does not grant this access."):
+        # Raising APIException marks an ATOMIC_REQUESTS transaction for
+        # rollback, which would erase the denial audit row.
+        return Response({"detail": detail}, status=status.HTTP_403_FORBIDDEN)
+
+    def _control_in_scope(self, engagement, control):
+        applications = {str(item) for item in engagement.application_scope}
+        controls = set(engagement.control_scope)
+        return (not applications or str(control.application_id) in applications) and (
+            not controls or control.unified_control.code in controls
+        )
+
+    @action(detail=True, methods=["get"], url_path="assurance-results")
+    def assurance_results(self, request, pk=None):
+        engagement = self.get_object()
+        target_id = request.query_params.get("target_id", "")
+        if not self._access(
+            engagement,
+            action_name="deployment_assurance.read",
+            object_type="deployment_assurance.target",
+            object_id=target_id,
+        ):
+            return self._access_denied()
+        from deployment_assurance.models import DeploymentDecision
+        from deployment_assurance.serializers import DeploymentDecisionSerializer
+
+        with engagement_target_context(engagement.auditee_tenant_id, engagement.id):
+            decisions = DeploymentDecision.all_objects.filter(tenant=engagement.auditee_tenant).select_related(
+                "target", "evaluation_run"
+            )
+            if engagement.application_scope:
+                decisions = decisions.filter(target__application_id__in=engagement.application_scope)
+            if target_id:
+                decisions = decisions.filter(target_id=target_id)
+            payload = []
+            for decision in decisions.order_by("-created_at")[:50]:
+                item = DeploymentDecisionSerializer(decision).data
+                results = decision.evaluation_run.results.select_related("policy_rule", "gap", "risk")
+                item["framework_impact"] = sorted(
+                    {
+                        f"{mapping.framework} {mapping.framework_version} {mapping.control_id}"
+                        for result in results
+                        for mapping in result.policy_rule.mappings.all()
+                    }
+                )
+                item["related_gap_ids"] = sorted({str(result.gap_id) for result in results if result.gap_id})
+                item["related_risk_ids"] = sorted({str(result.risk_id) for result in results if result.risk_id})
+                payload.append(item)
+        return Response(payload)
+
+    @action(detail=True, methods=["post"])
+    def verdicts(self, request, pk=None):
+        engagement = self.get_object()
+        # Reject an inactive or unassigned engagement before entering the
+        # auditee context; the object-level decision is recorded after lookup.
+        if not self._access(
+            engagement,
+            action_name="auditor_verdict.create",
+            object_type="core.engagement",
+            object_id=request.data.get("organisation_control_id", ""),
+            write=True,
+        ):
+            return self._access_denied()
+        serializer = AuditorVerdictRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        with engagement_target_context(engagement.auditee_tenant_id, engagement.id):
+            try:
+                control = OrganisationControl.all_objects.get(
+                    tenant=engagement.auditee_tenant, pk=data["organisation_control_id"]
+                )
+            except OrganisationControl.DoesNotExist as exc:
+                raise exceptions.ValidationError({"organisation_control_id": "No in-scope control exists."}) from exc
+            if not self._scope_access(
+                engagement,
+                action_name="auditor_verdict.create",
+                object_type="core.organisationcontrol",
+                object_id=control.id,
+                allowed=self._control_in_scope(engagement, control),
+            ):
+                return self._access_denied("The object is outside the engagement scope.")
+            previous = (
+                AuditorVerdict.all_objects.filter(
+                    tenant=engagement.auditee_tenant,
+                    engagement_id=engagement.id,
+                    organisation_control=control,
+                )
+                .order_by("-finalized_at")
+                .first()
+            )
+            if previous and previous.locked:
+                raise exceptions.ValidationError({"control": "The control is locked; unlock it before re-review."})
+            result_id = data.get("evidence_result_id")
+            if result_id:
+                from deployment_assurance.models import ControlResult
+
+                try:
+                    result = ControlResult.all_objects.select_related("evaluation_run").get(
+                        tenant=engagement.auditee_tenant, pk=result_id
+                    )
+                except ControlResult.DoesNotExist as exc:
+                    raise exceptions.ValidationError({"evidence_result_id": "No in-scope result exists."}) from exc
+                if result.evaluation_run.requested_by_id == str(request.user.id):
+                    raise exceptions.PermissionDenied("An evidence submitter cannot record its auditor verdict.")
+            verdict = AuditorVerdict.all_objects.create(
+                tenant=engagement.auditee_tenant,
+                engagement_id=engagement.id,
+                organisation_control=control,
+                decision=data["decision"],
+                rationale=data["rationale"],
+                evidence_result_id=result_id,
+                finalized_by=request.user,
+                supersedes=previous,
+            )
+            control_status = (
+                OrganisationControl.Status.UNDER_REVIEW
+                if data["decision"] == AuditorVerdict.Decision.QUERY_RAISED
+                else data["decision"]
+            )
+            OrganisationControl.all_objects.filter(pk=control.pk).update(
+                status=control_status, last_reviewed_at=timezone.now(), version=control.version + 1
+            )
+        return Response(SERIALIZERS[AuditorVerdict](verdict).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="unlock-control")
+    def unlock_control(self, request, pk=None):
+        engagement = self.get_object()
+        if not self._access(
+            engagement,
+            action_name="auditor_control.unlock",
+            object_type="core.engagement",
+            object_id=request.data.get("organisation_control_id", ""),
+            write=True,
+        ):
+            return self._access_denied()
+        try:
+            control_id = uuid.UUID(str(request.data["organisation_control_id"]))
+            reason = str(request.data["reason"]).strip()
+        except (KeyError, ValueError) as exc:
+            raise exceptions.ValidationError({"detail": "organisation_control_id and reason are required."}) from exc
+        if not reason:
+            raise exceptions.ValidationError({"reason": "An unlock reason is required."})
+        with engagement_target_context(engagement.auditee_tenant_id, engagement.id):
+            previous = (
+                AuditorVerdict.all_objects.filter(
+                    tenant=engagement.auditee_tenant,
+                    engagement_id=engagement.id,
+                    organisation_control_id=control_id,
+                )
+                .order_by("-finalized_at")
+                .first()
+            )
+            if previous is None or not previous.locked:
+                raise exceptions.ValidationError({"control": "The control is not locked."})
+            if not self._scope_access(
+                engagement,
+                action_name="auditor_control.unlock",
+                object_type="core.organisationcontrol",
+                object_id=control_id,
+                allowed=self._control_in_scope(engagement, previous.organisation_control),
+            ):
+                return self._access_denied("The object is outside the engagement scope.")
+            unlocked = AuditorVerdict.all_objects.create(
+                tenant=engagement.auditee_tenant,
+                engagement_id=engagement.id,
+                organisation_control=previous.organisation_control,
+                decision=previous.decision,
+                rationale=f"Unlocked: {reason}",
+                evidence_result_id=previous.evidence_result_id,
+                finalized_by=request.user,
+                locked=False,
+                supersedes=previous,
+            )
+        return Response(SERIALIZERS[AuditorVerdict](unlocked).data, status=status.HTTP_201_CREATED)
+
+
 class ReportViewSet(viewset_for(Report, immutable=True)):
     http_method_names = ["get", "post", "head", "options"]
 
@@ -527,10 +1160,22 @@ class AuditEventViewSet(viewset_for(AuditEvent, immutable=True)):
 
 
 MODEL_VIEWSETS = {
+    "tenant-admin": TenantAdminViewSet,
     "organizations": viewset_for(Organization),
     "workspaces": viewset_for(Workspace),
     "applications": viewset_for(Application),
-    "memberships": viewset_for(Membership),
+    "memberships": MembershipViewSet,
+    "tenant-relationships": readonly_viewset_for(TenantRelationship),
+    "subscription-plans": viewset_for(SubscriptionPlan),
+    "tenant-subscriptions": readonly_viewset_for(TenantSubscription),
+    "tenant-entitlements": readonly_viewset_for(TenantEntitlement),
+    "usage-records": readonly_viewset_for(UsageRecord),
+    "tenant-branding": viewset_for(TenantBranding),
+    "tenant-invitations": TenantInvitationViewSet,
+    "engagements": EngagementViewSet,
+    "engagement-scopes": viewset_for(EngagementScope),
+    "engagement-members": EngagementMemberViewSet,
+    "engagement-status-history": readonly_viewset_for(EngagementStatusHistory),
     "repositories": RepositoryViewSet,
     "repository-versions": viewset_for(RepositoryVersion, immutable=True),
     "jobs": viewset_for(Job),
@@ -543,6 +1188,13 @@ MODEL_VIEWSETS = {
     "threats": viewset_for(Threat),
     "framework-versions": viewset_for(FrameworkVersion, immutable=True),
     "requirements": viewset_for(Requirement, immutable=True),
+    "frameworks": readonly_viewset_for(Framework),
+    "unified-controls": readonly_viewset_for(UnifiedControlObjective),
+    "control-mappings": readonly_viewset_for(FrameworkControlMapping),
+    "evidence-requirements": readonly_viewset_for(EvidenceRequirement),
+    "organisation-controls": OrganisationControlViewSet,
+    "control-assignments": viewset_for(ControlAssignment),
+    "control-evidence-links": readonly_viewset_for(ControlEvidenceLink),
     "assessments": viewset_for(Assessment),
     "assessment-responses": AssessmentResponseViewSet,
     "assessment-evidence": viewset_for(AssessmentEvidence, immutable=True),
@@ -552,6 +1204,9 @@ MODEL_VIEWSETS = {
     "risk-links": viewset_for(RiskLink),
     "risk-scores": viewset_for(RiskScore, immutable=True),
     "remediations": viewset_for(Remediation),
+    "tasks": TaskViewSet,
+    "assessment-observations": readonly_viewset_for(AssessmentObservation),
+    "auditor-verdicts": readonly_viewset_for(AuditorVerdict),
     "risk-acceptances": viewset_for(RiskAcceptance),
     "approvals": ApprovalViewSet,
     "model-configurations": viewset_for(ModelConfiguration),
@@ -723,6 +1378,11 @@ def ai_invoke(request):
         estimated_input = sum(len(str(item.get("content", ""))) for item in request.data["messages"]) // 4
         if used_today + estimated_input + configuration.max_output_tokens > configuration.daily_token_limit:
             return Response({"error": "daily_token_budget_exceeded"}, status=429)
+        enforce(
+            configuration.tenant,
+            "ai_credits",
+            quantity=estimated_input + configuration.max_output_tokens,
+        )
         output, metadata = invoke(
             configuration=configuration,
             workflow=request.data["workflow"],
@@ -740,6 +1400,14 @@ def ai_invoke(request):
             input_tokens=metadata["input_tokens"],
             output_tokens=metadata["output_tokens"],
             policy_decisions=[f"classification:{classification}:allowed", "structured_output:valid"],
+        )
+        record_usage(
+            configuration.tenant,
+            "ai_credits",
+            run.input_tokens + run.output_tokens,
+            source_type="core.aianalysisrun",
+            source_id=run.id,
+            idempotency_key=f"ai:{run.id}",
         )
         AuditEvent.append(
             tenant=configuration.tenant,
@@ -761,6 +1429,7 @@ def ai_invoke(request):
         KeyError,
         ModelConfiguration.DoesNotExist,
         PromptVersion.DoesNotExist,
+        EntitlementDenied,
         GatewayPolicyError,
         ValueError,
     ) as exc:

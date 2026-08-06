@@ -33,6 +33,7 @@ psycopg-binary==3.3.4
 pycparser==3.0
 PyJWT==2.12.1
 python-dateutil==2.9.0.post0
+PyYAML==6.0.2
 redis==8.0.1
 referencing==0.37.0
 rpds-py==2026.6.3
