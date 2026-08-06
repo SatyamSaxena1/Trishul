@@ -30,7 +30,14 @@ jobs:
           cache: pip
       - run: pip install -r requirements-dev.txt
       - run: ruff check backend analyzer
-      - run: pytest
+      - name: Test Python and validate OSCAL 1.1.2 export
+        env:
+          OSCAL_SCHEMA_PATH: ${{ runner.temp }}/oscal_assessment-results_schema.json
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/usnistgov/OSCAL/releases/download/v1.1.2/oscal_assessment-results_schema.json \
+            --output "$OSCAL_SCHEMA_PATH"
+          pytest
       - name: Verify PostgreSQL RLS and integrity
         env:
           OWNER_DSN: postgresql://trishul_owner:owner-test-password@localhost:5432/trishul
@@ -54,6 +61,8 @@ jobs:
       - working-directory: frontend
         run: npm ci
       - working-directory: frontend
+        run: npm audit
+      - working-directory: frontend
         run: npm test
       - working-directory: frontend
         run: npm run build
@@ -63,7 +72,16 @@ jobs:
           version: v1.34.1
       - run: kubectl kustomize deploy/kubernetes/base >/dev/null
       - run: kubectl kustomize deploy/kubernetes/openshift >/dev/null
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.13.5"
+      - working-directory: deploy/aws
+        run: terraform fmt -check && terraform init -backend=false && terraform validate
       - run: sh -n bin/trishulctl bin/trishulkube
+      - name: Verify the deployment gate client is self-contained
+        run: |
+          python -m py_compile bin/trishul-gate
+          python bin/trishul-gate --help >/dev/null
 
   images:
     runs-on: ubuntu-latest

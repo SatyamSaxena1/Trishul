@@ -15,4 +15,11 @@ patches:
       kind: Ingress
       metadata:
         name: trishul
+  - target:
+      version: v1
+      kind: ConfigMap
+      name: trishul-config
+    patch: |-
+      - op: remove
+        path: /data/KUBE_FS_GROUP
 

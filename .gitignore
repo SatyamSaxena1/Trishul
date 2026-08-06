@@ -12,6 +12,10 @@ frontend/dist/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
 secrets/*
 !secrets/.gitkeep
 !secrets/README.md

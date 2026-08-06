@@ -1,6 +1,6 @@
 # AI Trishul
 
-AI Trishul is a customer-hosted security intelligence MVP connecting evidence-backed code review, human-verified threat modeling, evidence-based assessments, and deterministic risk prioritization.
+AI Trishul is a multi-tenant GRC and deployment-assurance platform connecting evidence-backed code review, human-verified threat modeling, audit-firm engagements, compliance operations, and deterministic risk prioritization. It supports shared SaaS, isolated enterprise SaaS, and customer-hosted deployment models.
 
 ## Implemented MVP
 
@@ -14,6 +14,8 @@ AI Trishul is a customer-hosted security intelligence MVP connecting evidence-ba
 - Structured STRIDE threat generation requiring human-verified components and flows.
 - Evidence-required assessment conclusions and independent risk-acceptance approval.
 - Deterministic, versioned risk scoring with retained inputs.
+- Deployment Assurance: Terraform/Kubernetes/Compose/inventory normalization, a signed 20-rule control pack, blocker-first gate decisions, scoped time-bound exceptions, OSCAL assessment-results export, and a CI gate client that fails closed.
+- SaaS operations: platform, audit-firm, and auditee tenant types; engagement-only cross-tenant access; server-side entitlements and usage; UCF-backed controls, evidence, gaps, risks, tasks, and locked auditor verdicts.
 - Provider-neutral AI gateway with endpoint allowlisting, TLS validation, secret redaction, structured output validation, and no fallback.
 - Static React/TypeScript OIDC interface served by the TLS edge container.
 - Docker Compose deployment, encrypted backup/restore, offline release bundling, health checks, metrics, and upgrade tooling.
@@ -40,5 +42,6 @@ On Windows, replace `.venv/bin` with `.venv/Scripts`.
 4. Build or load the signed release images.
 5. Run `sh bin/trishulctl doctor`, then `sh bin/trishulctl install`.
 6. Bootstrap the first OIDC subject with `sh bin/trishulctl bootstrap SUBJECT EMAIL TENANT_SLUG "Tenant Name"`.
+7. Install the deployment control pack with `docker compose exec api python manage.py bootstrap_assurance TENANT_SLUG`.
 
-See [operations](docs/operations.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), and [architecture](docs/architecture.md).
+See [operations](docs/operations.md), [AWS shared-SaaS reference](deploy/aws/README.md), [enterprise deployment](docs/enterprise-deployment.md), [security model](docs/security.md), [architecture](docs/architecture.md), and [deployment assurance](docs/deployment-assurance.md).
