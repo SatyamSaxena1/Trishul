@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trishul-checkpoint-writer
+automountServiceAccountToken: false
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trishul-audit-checkpoint
+spec:
+  schedule: "5 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 900
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: trishul-audit-checkpoint
+        spec:
+          serviceAccountName: trishul-checkpoint-writer
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: checkpoint
+              image: registry.example.internal/ai-trishul@sha256:0000000000000000000000000000000000000000000000000000000000000000
+              imagePullPolicy: IfNotPresent
+              command: [python, manage.py, publish_audit_checkpoint]
+              envFrom: [{ configMapRef: { name: trishul-config } }]
+              resources: { requests: { cpu: 25m, memory: 128Mi }, limits: { cpu: 250m, memory: 256Mi } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+              volumeMounts:
+                - { name: runtime-secrets, mountPath: /run/secrets, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: runtime-secrets
+              secret: { secretName: trishul-runtime-secrets, defaultMode: 0444 }
+            - name: tmp
+              emptyDir: { sizeLimit: 64Mi }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: audit-checkpoint-egress
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/name: trishul-audit-checkpoint } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0 } }]
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 5432 }

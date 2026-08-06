@@ -64,3 +64,27 @@ variable "codeconnections_connection_arn" {
   type        = string
   description = "ARN of an authorized CodeConnections connection for the GitHub repository."
 }
+
+variable "security_account_id" {
+  type        = string
+  description = "AWS account that owns the immutable audit checkpoint bucket."
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.security_account_id))
+    error_message = "security_account_id must be a 12-digit AWS account ID."
+  }
+}
+
+variable "audit_checkpoint_bucket_name" {
+  type        = string
+  description = "Existing Object Lock bucket in the security account."
+}
+
+variable "audit_checkpoint_prefix" {
+  type        = string
+  default     = "audit-checkpoints"
+  description = "Write-only prefix granted to the checkpoint publisher."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9][A-Za-z0-9/_-]{0,127}$", var.audit_checkpoint_prefix)) && !strcontains(var.audit_checkpoint_prefix, "..") && !strcontains(var.audit_checkpoint_prefix, "//")
+    error_message = "audit_checkpoint_prefix must be a safe, relative S3 prefix."
+  }
+}

@@ -1,0 +1,3 @@
+security_account_id = "210987654321"
+workload_account_id = "123456789012"
+bucket_name         = "replace-with-globally-unique-checkpoint-bucket"

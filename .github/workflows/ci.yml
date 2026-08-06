@@ -77,7 +77,9 @@ jobs:
         with:
           terraform_version: "1.13.5"
       - working-directory: deploy/aws
-        run: terraform fmt -check && terraform init -backend=false && terraform validate && terraform test
+        run: terraform fmt -check -recursive && terraform init -backend=false && terraform validate && terraform test
+      - working-directory: deploy/aws/checkpoint
+        run: terraform init -backend=false && terraform validate && terraform test
       - run: sh -n bin/trishulctl bin/trishulkube
       - name: Verify the deployment gate client is self-contained
         run: |
