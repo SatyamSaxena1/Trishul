@@ -5,7 +5,7 @@ resource "aws_eks_addon" "pod_identity" {
 }
 
 resource "aws_iam_role" "application" {
-  name = "${local.name}-application"
+  name = "${local.name}-application${local.iam_suffix}"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "pods.eks.amazonaws.com" }, Action = ["sts:AssumeRole", "sts:TagSession"] }]
@@ -21,17 +21,17 @@ resource "aws_iam_role_policy" "application_storage" {
       {
         Effect   = "Allow"
         Action   = ["s3:GetBucketLocation", "s3:ListBucket"]
-        Resource = aws_s3_bucket.evidence.arn
+        Resource = local.evidence_bucket_arn
       },
       {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = "${aws_s3_bucket.evidence.arn}/*"
+        Resource = "${local.evidence_bucket_arn}/*"
       },
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
-        Resource = aws_kms_key.data.arn
+        Resource = local.evidence_kms_key_arn
       },
     ]
   })
@@ -47,7 +47,8 @@ resource "aws_eks_pod_identity_association" "application" {
 }
 
 resource "aws_iam_role" "checkpoint_writer" {
-  name = "${local.name}-checkpoint-writer"
+  count = local.is_primary ? 1 : 0
+  name  = "${local.name}-checkpoint-writer"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "pods.eks.amazonaws.com" }, Action = ["sts:AssumeRole", "sts:TagSession"] }]
@@ -55,8 +56,9 @@ resource "aws_iam_role" "checkpoint_writer" {
 }
 
 resource "aws_iam_role_policy" "checkpoint_writer" {
-  name = "immutable-checkpoints"
-  role = aws_iam_role.checkpoint_writer.id
+  count = local.is_primary ? 1 : 0
+  name  = "immutable-checkpoints"
+  role  = aws_iam_role.checkpoint_writer[0].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -86,11 +88,16 @@ resource "aws_iam_role_policy" "checkpoint_writer" {
   })
 }
 
+data "aws_iam_role" "checkpoint_writer" {
+  count = local.is_primary ? 0 : 1
+  name  = "${local.name}-checkpoint-writer"
+}
+
 resource "aws_eks_pod_identity_association" "checkpoint_writer" {
   cluster_name    = aws_eks_cluster.main.name
   namespace       = "ai-trishul"
   service_account = "trishul-checkpoint-writer"
-  role_arn        = aws_iam_role.checkpoint_writer.arn
+  role_arn        = local.checkpoint_writer_role_arn
   depends_on      = [aws_eks_addon.pod_identity]
 }
 

@@ -20,7 +20,7 @@ resource "aws_security_group_rule" "cluster_from_codebuild" {
 }
 
 resource "aws_iam_role" "codebuild" {
-  name = "${local.name}-codebuild"
+  name = "${local.name}-codebuild${local.iam_suffix}"
   assume_role_policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Principal = { Service = "codebuild.amazonaws.com" }, Action = "sts:AssumeRole" }]
@@ -106,7 +106,7 @@ resource "aws_codebuild_project" "deploy" {
     }
     environment_variable {
       name  = "TRISHUL_S3_BUCKET"
-      value = aws_s3_bucket.evidence.id
+      value = local.evidence_bucket_id
     }
     environment_variable {
       name  = "TRISHUL_AUDIT_CHECKPOINT_BUCKET"
@@ -151,7 +151,7 @@ resource "aws_eks_access_policy_association" "codebuild" {
 }
 
 resource "aws_iam_role" "github_deploy" {
-  name = "${local.name}-github-deploy"
+  name = "${local.name}-github-deploy${local.iam_suffix}"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
