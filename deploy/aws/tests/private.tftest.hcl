@@ -106,3 +106,30 @@ run "recovery_mode_reuses_replicated_data" {
     error_message = "Recovery mode must restore the latest replicated RDS point without managing replication."
   }
 }
+
+run "recovery_mode_rejects_the_wrong_region" {
+  command = plan
+
+  variables {
+    deployment_mode                   = "recovery"
+    aws_region                        = "ap-southeast-2"
+    dr_region                         = "ap-southeast-1"
+    recovery_evidence_bucket_name     = "trishul-pilot-evidence-dr"
+    recovery_evidence_kms_key_arn     = "arn:aws:kms:ap-southeast-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+    recovery_db_automated_backups_arn = "arn:aws:rds:ap-southeast-1:123456789012:auto-backup:ab-recovery"
+    github_repository                 = "example/trishul"
+    github_oidc_provider_arn          = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+    codeconnections_connection_arn    = "arn:aws:codeconnections:ap-southeast-2:123456789012:connection/00000000-0000-0000-0000-000000000000"
+    security_account_id               = "210987654321"
+    audit_checkpoint_bucket_name      = "security-audit-checkpoints"
+  }
+
+  override_data {
+    target = data.aws_iam_role.checkpoint_writer
+    values = {
+      arn = "arn:aws:iam::123456789012:role/trishul-pilot-checkpoint-writer"
+    }
+  }
+
+  expect_failures = [check.recovery_inputs]
+}

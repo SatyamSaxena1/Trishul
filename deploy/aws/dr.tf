@@ -168,7 +168,7 @@ resource "aws_cloudwatch_metric_alarm" "s3_replication_latency" {
   period              = 900
   statistic           = "Maximum"
   threshold           = 900
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "ignore"
   dimensions = {
     SourceBucket      = aws_s3_bucket.evidence[0].id
     DestinationBucket = aws_s3_bucket.evidence_replica[0].id
@@ -189,7 +189,7 @@ resource "aws_cloudwatch_metric_alarm" "s3_replication_failures" {
   period              = 900
   statistic           = "Sum"
   threshold           = 0
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "ignore"
   dimensions = {
     SourceBucket      = aws_s3_bucket.evidence[0].id
     DestinationBucket = aws_s3_bucket.evidence_replica[0].id
