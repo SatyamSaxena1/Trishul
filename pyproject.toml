@@ -1,13 +1,13 @@
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "trishul.settings_test"
 pythonpath = ["backend"]
-testpaths = ["backend/core/tests", "backend/deployment_assurance/tests"]
+testpaths = ["backend/core/tests", "backend/deployment_assurance/tests", "backend/workflow/tests"]
 addopts = "-q"
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-extend-exclude = ["backend/core/migrations", "backend/deployment_assurance/migrations"]
+extend-exclude = ["backend/core/migrations", "backend/deployment_assurance/migrations", "backend/workflow/migrations"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "S", "B"]
@@ -16,9 +16,10 @@ ignore = ["S101"]
 [tool.ruff.lint.isort]
 # Cross-module imports (`from core.models import ...`) would otherwise be
 # grouped with third-party packages.
-known-first-party = ["analyzer", "core", "deployment_assurance", "trishul"]
+known-first-party = ["analyzer", "core", "deployment_assurance", "trishul", "workflow"]
 
 [tool.ruff.lint.per-file-ignores]
 "backend/core/tests/*" = ["S105", "S106"]
 "backend/deployment_assurance/tests/*" = ["S105", "S106"]
+"backend/workflow/tests/*" = ["S105", "S106"]
 "backend/trishul/settings_test.py" = ["E402", "F403", "S105"]

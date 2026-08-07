@@ -20,12 +20,13 @@ must not be able to silently approve a deployment, nor to take down the gate.
 import logging
 from decimal import Decimal
 
-from django.db import transaction
 from django.utils import timezone
 
 from core.models import AuditEvent
 from core.risk import FORMULA_VERSION
 from core.runner import normalize_deployment
+from workflow.engine import InvalidTransition, StaleTransition, transition
+from workflow.machines import EVALUATION
 
 from . import decisions, evidence, grc
 from .limits import (
@@ -93,7 +94,10 @@ def evaluate_snapshot(run: EvaluationRun) -> DeploymentDecision:
     profile_parameters = (run.policy_profile.parameters if run.policy_profile else {}) or {}
 
     # --- 1. Normalize -----------------------------------------------------
-    _transition(run, EvaluationRun.State.NORMALIZING)
+    if run.state == EvaluationRun.State.QUEUED:
+        _transition(run, "start")
+    elif run.state != EvaluationRun.State.NORMALIZING:
+        raise EvaluationError(f"invalid_evaluation_state:{run.state}")
     try:
         document = normalize_deployment(snapshot=snapshot, run_id=run.id)
     except (UnsafeArtifact, ArtifactTooLarge) as exc:
@@ -145,7 +149,7 @@ def evaluate_snapshot(run: EvaluationRun) -> DeploymentDecision:
     }
 
     # --- 2. Evaluate ------------------------------------------------------
-    _transition(run, EvaluationRun.State.EVALUATING)
+    _transition(run, "evaluate")
     had_error = False
     emitted: list[dict] = []
     covered_types = REGISTRY.covered_resource_types
@@ -207,7 +211,7 @@ def evaluate_snapshot(run: EvaluationRun) -> DeploymentDecision:
                 raise EvaluationError("result_volume_exceeded")
 
     # --- 3. Persist results, apply waivers, score -------------------------
-    _transition(run, EvaluationRun.State.DECIDING)
+    _transition(run, "decide")
     profile = decisions.TargetProfile.from_target(target)
     waivers = list(
         ExceptionWaiver.all_objects.filter(
@@ -357,9 +361,6 @@ def evaluate_snapshot(run: EvaluationRun) -> DeploymentDecision:
         "rules": len(stored_rules),
         "results_hash": results_hash,
     }
-    run.state = EvaluationRun.State.COMPLETED
-    run.completed_at = timezone.now()
-    run.version += 1
     run.save(
         update_fields=[
             "input_hash",
@@ -368,12 +369,10 @@ def evaluate_snapshot(run: EvaluationRun) -> DeploymentDecision:
             "result_manifest_key",
             "result_manifest_hash",
             "summary",
-            "state",
-            "completed_at",
-            "version",
             "updated_at",
         ]
     )
+    _transition(run, "complete", mutate=lambda entity: _complete(entity))
     _supersede_previous(decision)
 
     AuditEvent.append(
@@ -441,8 +440,29 @@ def _supersede_previous(decision: DeploymentDecision) -> None:
     ).exclude(pk=decision.pk).update(superseded_by=decision)
 
 
-def _transition(run: EvaluationRun, state: str) -> None:
-    with transaction.atomic():
-        run.state = state
-        run.version += 1
-        run.save(update_fields=["state", "version", "updated_at"])
+def _complete(run: EvaluationRun):
+    run.completed_at = timezone.now()
+    run.lease_expires_at = None
+    return ("completed_at", "lease_expires_at")
+
+
+def _transition(run: EvaluationRun, event: str, mutate=None) -> None:
+    try:
+        result = transition(
+            model=EvaluationRun,
+            entity_id=run.id,
+            machine=EVALUATION,
+            event=event,
+            tenant=run.tenant,
+            actor_type="system",
+            actor_id="deployment-assurance",
+            expected_version=run.version,
+            mutate=mutate,
+        )
+    except (InvalidTransition, StaleTransition) as exc:
+        raise EvaluationError(f"invalid_evaluation_transition:{event}") from exc
+    run.state = result.entity.state
+    run.version = result.entity.version
+    run.updated_at = result.entity.updated_at
+    for field in ("completed_at", "lease_expires_at"):
+        setattr(run, field, getattr(result.entity, field))

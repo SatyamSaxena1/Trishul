@@ -20,6 +20,8 @@ from django.utils import timezone
 
 from core.models import AuditEvent, Tenant
 from core.tenancy import database_tenant_context, tenant_context
+from workflow.engine import transition
+from workflow.machines import EVALUATION
 
 from .evaluation import EvaluationError, evaluate_snapshot
 from .models import EvaluationRun, ExceptionWaiver
@@ -61,12 +63,24 @@ def _execute_evaluation(tenant_id, run_id):
         if run.state != EvaluationRun.State.QUEUED:
             logger.info("Evaluation %s is already %s; ignoring duplicate delivery.", run_id, run.state)
             return
-        run.state = EvaluationRun.State.NORMALIZING
-        run.started_at = timezone.now()
-        run.attempts += 1
-        run.lease_expires_at = timezone.now() + timedelta(seconds=settings.ASSURANCE_EVALUATION_LEASE_SECONDS)
-        run.version += 1
-        run.save(update_fields=["state", "started_at", "attempts", "lease_expires_at", "version", "updated_at"])
+
+        def claim(entity):
+            entity.started_at = timezone.now()
+            entity.attempts += 1
+            entity.lease_expires_at = timezone.now() + timedelta(seconds=settings.ASSURANCE_EVALUATION_LEASE_SECONDS)
+            return ("started_at", "attempts", "lease_expires_at")
+
+        run = transition(
+            model=EvaluationRun,
+            entity_id=run.id,
+            machine=EVALUATION,
+            event="start",
+            tenant=run.tenant,
+            actor_type="system",
+            actor_id="deployment-assurance-worker",
+            expected_version=run.version,
+            mutate=claim,
+        ).entity
 
     try:
         evaluate_snapshot(run)
@@ -93,19 +107,24 @@ def _fail(tenant_id, run_id, error_code: str) -> None:
         run = EvaluationRun.objects.select_for_update().select_related("tenant", "target").get(pk=run_id)
         if run.state in EvaluationRun.TERMINAL_STATES:
             return
-        run.state = EvaluationRun.State.FAILED
-        run.error_code = error_code
-        run.completed_at = timezone.now()
-        run.version += 1
-        run.save(update_fields=["state", "error_code", "completed_at", "version", "updated_at"])
-        AuditEvent.append(
+
+        def fail(entity):
+            entity.error_code = error_code
+            entity.completed_at = timezone.now()
+            entity.lease_expires_at = None
+            return ("error_code", "completed_at", "lease_expires_at")
+
+        transition(
+            model=EvaluationRun,
+            entity_id=run.id,
+            machine=EVALUATION,
+            event="fail",
             tenant=run.tenant,
             actor_type="system",
-            actor_id="deployment-assurance",
-            action="deployment.evaluation.failed",
-            resource_type="deployment_assurance.evaluationrun",
-            resource_id=run.id,
-            details={"error_code": error_code, "target_id": str(run.target_id), "attempts": run.attempts},
+            actor_id="deployment-assurance-worker",
+            expected_version=run.version,
+            reason_code=error_code,
+            mutate=fail,
         )
 
 
@@ -131,21 +150,25 @@ def reconcile_evaluations():
             ).select_for_update()
             for run in stale:
                 retryable = run.attempts < maximum
-                run.state = EvaluationRun.State.QUEUED if retryable else EvaluationRun.State.FAILED
-                run.error_code = "lease_expired"
-                if not retryable:
-                    run.completed_at = now
-                run.lease_expires_at = None
-                run.version += 1
-                run.save(
-                    update_fields=[
-                        "state",
-                        "error_code",
-                        "completed_at",
-                        "lease_expires_at",
-                        "version",
-                        "updated_at",
-                    ]
+
+                def expire_lease(entity, retryable=retryable):
+                    entity.error_code = "lease_expired"
+                    entity.lease_expires_at = None
+                    if not retryable:
+                        entity.completed_at = now
+                    return ("error_code", "lease_expires_at", "completed_at")
+
+                transition(
+                    model=EvaluationRun,
+                    entity_id=run.id,
+                    machine=EVALUATION,
+                    event="retry" if retryable else "fail",
+                    tenant=run.tenant,
+                    actor_type="system",
+                    actor_id="deployment-assurance-reconciler",
+                    expected_version=run.version,
+                    reason_code="lease_expired",
+                    mutate=expire_lease,
                 )
                 if retryable:
                     dispatch_evaluation(str(tenant_id), str(run.id))

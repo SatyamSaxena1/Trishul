@@ -37,6 +37,11 @@ type EvaluationRun = RecordBase & { target: string; state: string; error_code: s
 type ControlResult = RecordBase & { outcome: string; reason_code: string; resource_type: string; resource_id: string; gap: string | null; risk: string | null };
 type EvidenceArtifact = RecordBase & { role: string; sha256: string; size_bytes: number };
 type Waiver = RecordBase & { status: string; expires_at: string; resource_fingerprint: string };
+type WorkflowState = { state: string; version: number; events: string[] };
+type WorkflowTransition = {
+  id: string; event: string; from_state: string; to_state: string; actor_id: string;
+  reason: string; entity_version: number; occurred_at: string;
+};
 
 const EMPTY_PAGE = { results: [], next: null, previous: null };
 
@@ -205,6 +210,56 @@ function EngagementWizard({ api, role, onCreated }: { api: Api; role: string | n
   </form>;
 }
 
+function WorkflowActions({ api, path, item, onChanged }: {
+  api: Api; path: string; item: RecordBase; onChanged: () => void;
+}) {
+  const [workflow, setWorkflow] = useState<WorkflowState>();
+  const [timeline, setTimeline] = useState<WorkflowTransition[]>();
+  const [reason, setReason] = useState("");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void api.request<WorkflowState>(`${path}/${item.id}/available-transitions/`)
+      .then((value) => { if (active) setWorkflow(value); })
+      .catch(() => { if (active) setWorkflow(undefined); });
+    return () => { active = false; };
+  }, [api, path, item.id, item.version]);
+
+  async function advance(event: string) {
+    setMessage("");
+    if (["close", "revoke"].includes(event) && !reason.trim()) {
+      setMessage("A reason is required."); return;
+    }
+    try {
+      await api.request(`${path}/${item.id}/transition/`, {
+        method: "POST",
+        headers: { "If-Match": String(workflow?.version ?? item.version), "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ event, reason }),
+      });
+      onChanged();
+    } catch (error) {
+      setMessage(error instanceof ApiError && error.status === 412 ? "State changed; refresh and try again." : error instanceof Error ? error.message : "Transition failed.");
+    }
+  }
+
+  async function loadTimeline() {
+    try { setTimeline(await api.request<WorkflowTransition[]>(`${path}/${item.id}/timeline/`)); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "Timeline unavailable."); }
+  }
+
+  if (!workflow?.events.length && !timeline) return <button className="secondary" onClick={() => void loadTimeline()}>History</button>;
+  return <div>
+    {!!workflow?.events.length && <div className="actions">
+      {workflow.events.map((event) => <button key={event} type="button" onClick={() => void advance(event)}>{decisionLabel(event)}</button>)}
+      {workflow.events.some((event) => ["close", "revoke"].includes(event)) && <label>Reason<input value={reason} onChange={(event) => setReason(event.target.value)} maxLength={4000} /></label>}
+    </div>}
+    <button className="secondary" type="button" onClick={() => void loadTimeline()}>History</button>
+    {message && <small role="alert">{message}</small>}
+    {timeline && <ol aria-label="Workflow history">{timeline.map((entry) => <li key={entry.id}><strong>{decisionLabel(entry.event)}</strong> {entry.from_state || "imported"} → {entry.to_state}<small>{new Date(entry.occurred_at).toLocaleString()} · {entry.reason}</small></li>)}</ol>}
+  </div>;
+}
+
 function Dashboard({ user }: { user: User }) {
   const [tenantId, setTenantId] = useState(localStorage.getItem("trishul.tenant") ?? "");
   const [context, setContext] = useState<Context | null>(null);
@@ -310,21 +365,21 @@ function Dashboard({ user }: { user: User }) {
         <section className="panel" id="saas"><div className="section-title"><div><p className="eyebrow">SAAS OPERATIONS</p><h2>Tenants and engagements</h2></div><span>{engagements.results.filter((item) => item.status === "active").length} active engagements</span></div>
           <div className="two-column"><SaaSAction api={api} role={context?.role ?? null} onCreated={() => setRefresh((value) => value + 1)} /><EngagementWizard api={api} role={context?.role ?? null} onCreated={() => setRefresh((value) => value + 1)} /></div>
           {!!firms.length && <table><thead><tr><th>Audit firm</th><th>Isolation</th></tr></thead><tbody>{firms.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.slug}</small></td><td>{decisionLabel(item.isolation_tier)}</td></tr>)}</tbody></table>}
-          {!!engagements.results.length && <table><thead><tr><th>Engagement</th><th>Window</th><th>Status</th></tr></thead><tbody>{engagements.results.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.reference}</small></td><td>{item.starts_on} – {item.ends_on}</td><td>{item.status}</td></tr>)}</tbody></table>}
+          {!!engagements.results.length && <table><thead><tr><th>Engagement</th><th>Window</th><th>Status</th><th>Workflow</th></tr></thead><tbody>{engagements.results.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.reference}</small></td><td>{item.starts_on} – {item.ends_on}</td><td>{item.status}</td><td><WorkflowActions api={api} path="engagements" item={item} onChanged={() => setRefresh((value) => value + 1)} /></td></tr>)}</tbody></table>}
           {!firms.length && !engagements.results.length && <p className="empty">No tenant administration or assigned audit work is available for this role.</p>}
           {!!entitlements.results.length && <p className="quiet">Entitlements: {entitlements.results.map((item) => `${item.code}=${item.enabled ? item.limit ?? "enabled" : "disabled"}`).join(" · ")}</p>}
           {!!usage.results.length && <p className="quiet">Latest usage: {usage.results.slice(0, 6).map((item) => `${item.metric} ${item.quantity}`).join(" · ")}</p>}
         </section>
         <section className="panel" id="compliance"><div className="section-title"><div><p className="eyebrow">CISO SUMMARY</p><h2>Governance and compliance posture</h2></div><span>{evidence.results.length} evidence records</span></div>
           <div className="score-grid"><article><span>Controls requiring attention</span><strong>{controls.results.filter((item) => !["compliant", "not_applicable"].includes(item.status)).length}</strong></article><article><span>Open gaps</span><strong>{gaps.results.filter((item) => item.status !== "closed").length}</strong></article><article><span>Open tasks</span><strong>{tasks.results.filter((item) => item.status !== "completed").length}</strong></article><article><span>Active risks</span><strong>{risks.results.filter((item) => item.state !== "closed").length}</strong></article></div>
-          <div className="two-column"><div><h3>Organisation controls</h3>{controls.results.slice(0, 8).map((item) => <article className="item" key={item.id}><strong>{item.unified_control}</strong><span>{decisionLabel(item.status)}</span></article>)}{!controls.results.length && <p className="empty">No controls have evidence yet.</p>}</div><div><h3>Remediation tasks</h3>{tasks.results.slice(0, 8).map((item) => <article className="item" key={item.id}><div><strong>{item.title}</strong><small>{item.due_at ?? "No due date"}</small></div><span>{decisionLabel(item.status)}</span></article>)}{!tasks.results.length && <p className="empty">No remediation work is open.</p>}</div></div>
+          <div className="two-column"><div><h3>Organisation controls</h3>{controls.results.slice(0, 8).map((item) => <article className="item" key={item.id}><div><strong>{item.unified_control}</strong><small>{decisionLabel(item.status)}</small></div><WorkflowActions api={api} path="organisation-controls" item={item} onChanged={() => setRefresh((value) => value + 1)} /></article>)}{!controls.results.length && <p className="empty">No controls have evidence yet.</p>}</div><div><h3>Remediation tasks</h3>{tasks.results.slice(0, 8).map((item) => <article className="item" key={item.id}><div><strong>{item.title}</strong><small>{item.due_at ?? "No due date"}</small></div><span>{decisionLabel(item.status)}</span></article>)}{!tasks.results.length && <p className="empty">No remediation work is open.</p>}</div></div>
         </section>
         <section className="panel" id="applications"><div className="section-title"><div><p className="eyebrow">PORTFOLIO</p><h2>Applications</h2></div><AppWizard api={api} onCreated={() => setRefresh((value) => value + 1)} /></div><table><thead><tr><th>Name</th><th>Criticality</th><th>Exposure</th></tr></thead><tbody>{applications.results.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.description}</small></td><td>{severityLabel(item.criticality)}</td><td>{item.internet_exposed ? "Internet" : "Internal"}</td></tr>)}</tbody></table>{!applications.results.length && <p className="empty">No applications registered.</p>}</section>
         <section className="panel" id="deployments">
           <div className="section-title"><div><p className="eyebrow">DEPLOYMENT ASSURANCE</p><h2>Latest gate decisions</h2></div><span>{targets.results.filter((item) => item.state === "active").length} active targets</span></div>
           <DeploymentWizard api={api} applications={applications.results} targets={targets.results} onCreated={() => setRefresh((value) => value + 1)} />
           <h3>Evaluation history</h3>
-          <table><thead><tr><th>Run</th><th>State</th><th>Result</th></tr></thead><tbody>{runs.results.slice(0, 10).map((item) => <tr key={item.id}><td><strong>{item.id.slice(0, 8)}</strong><small>{item.created_at}</small></td><td>{isTerminalState(item.state) ? item.state : `In progress: ${item.state}`}</td><td>{item.error_code || (item.summary ? `${item.summary.fail ?? 0} failed` : "Pending")}</td></tr>)}</tbody></table>
+          <table><thead><tr><th>Run</th><th>State</th><th>Result</th><th>Workflow</th></tr></thead><tbody>{runs.results.slice(0, 10).map((item) => <tr key={item.id}><td><strong>{item.id.slice(0, 8)}</strong><small>{item.created_at}</small></td><td>{isTerminalState(item.state) ? item.state : `In progress: ${item.state}`}</td><td>{item.error_code || (item.summary ? `${item.summary.fail ?? 0} failed` : "Pending")}</td><td><WorkflowActions api={api} path="assurance/evaluation-runs" item={item} onChanged={() => setRefresh((value) => value + 1)} /></td></tr>)}</tbody></table>
           {!runs.results.length && <p className="empty">No evaluation runs yet.</p>}
           <table><thead><tr><th>Target</th><th>Environment</th><th>Compliance</th><th>Risk</th><th>Decision</th></tr></thead><tbody>
             {decisions.results.filter((item) => !item.superseded_by).map((item) => {

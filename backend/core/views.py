@@ -20,6 +20,10 @@ from rest_framework.decorators import action, api_view, authentication_classes, 
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
+from workflow.engine import InvalidTransition, StaleTransition, transition
+from workflow.machines import CONTROL, ENGAGEMENT
+from workflow.models import WorkflowTransition
+
 from .ai_gateway import GatewayPolicyError, invoke
 from .archive import UnsafeArchive, inspect_archive
 from .entitlements import EntitlementDenied, enforce, record_usage
@@ -107,6 +111,12 @@ class PreconditionFailed(exceptions.APIException):
     status_code = 412
     default_detail = "Resource version does not match."
     default_code = "precondition_failed"
+
+
+class TransitionConflict(exceptions.APIException):
+    status_code = 409
+    default_detail = "The requested lifecycle transition is not available."
+    default_code = "invalid_transition"
 
 
 PERMISSION_PREFIX = {
@@ -626,6 +636,73 @@ class OrganisationControlViewSet(viewset_for(OrganisationControl)):
             )
         return queryset
 
+    @action(detail=True, methods=["get"], url_path="available-transitions")
+    def available_transitions(self, request, pk=None):
+        control = self.get_object()
+        allowed = {"submit_evidence", "start_review"}
+        return Response(
+            {
+                "state": control.status,
+                "version": control.version,
+                "events": [event for event in CONTROL.available_events(control.status) if event in allowed],
+            }
+        )
+
+    @action(detail=True, methods=["get"])
+    def timeline(self, request, pk=None):
+        control = self.get_object()
+        rows = WorkflowTransition.objects.filter(machine=CONTROL.name, entity_id=control.id)
+        return Response(
+            [
+                {
+                    "id": row.id,
+                    "event": row.event,
+                    "from_state": row.from_state,
+                    "to_state": row.to_state,
+                    "actor_type": row.actor_type,
+                    "actor_id": row.actor_id,
+                    "reason": row.reason,
+                    "machine_version": row.machine_version,
+                    "entity_version": row.entity_version_after,
+                    "occurred_at": row.created_at,
+                }
+                for row in rows
+            ]
+        )
+
+    @action(detail=True, methods=["post"])
+    def transition(self, request, pk=None):
+        control = self.get_object()
+        idempotency_key = request.headers.get("Idempotency-Key", "")
+        if idempotency_key and WorkflowTransition.objects.filter(
+            machine=CONTROL.name, entity_id=control.id, idempotency_key=idempotency_key
+        ).exists():
+            control.refresh_from_db()
+            return Response(SERIALIZERS[OrganisationControl](control).data)
+        self._match_version(control)
+        event = str(request.data.get("event", ""))
+        if event not in {"submit_evidence", "start_review"} or event not in CONTROL.available_events(control.status):
+            raise exceptions.ValidationError({"event": "This transition is not available."})
+        try:
+            result = transition(
+                model=OrganisationControl,
+                entity_id=control.id,
+                machine=CONTROL,
+                event=event,
+                tenant=request.tenant,
+                actor_type="user",
+                actor_id=str(request.user.id),
+                actor_tenant=request.tenant,
+                expected_version=control.version,
+                reason=str(request.data.get("reason", "")).strip(),
+                idempotency_key=idempotency_key,
+            )
+        except StaleTransition as exc:
+            raise PreconditionFailed() from exc
+        except InvalidTransition as exc:
+            raise TransitionConflict() from exc
+        return Response(SERIALIZERS[OrganisationControl](result.entity).data)
+
 
 class TaskViewSet(viewset_for(Task)):
     def get_required_permission(self):
@@ -727,11 +804,13 @@ class EngagementViewSet(viewset_for(Engagement)):
                 enforce(self.request.tenant, "frameworks", item=framework)
             except EntitlementDenied as exc:
                 raise exceptions.PermissionDenied(str(exc)) from exc
-        active = serializer.validated_data.get("status") == Engagement.Status.ACTIVE
+        requested_status = self.request.data.get("status", Engagement.Status.DRAFT)
+        if requested_status not in {Engagement.Status.DRAFT, Engagement.Status.ACTIVE}:
+            raise exceptions.ValidationError({"status": "Create a draft or active engagement."})
         engagement = serializer.save(
             tenant=self.request.tenant,
             created_by=self.request.user,
-            approved_by=self.request.user if active else None,
+            approved_by=None,
         )
         EngagementStatusHistory.all_objects.create(
             tenant=self.request.tenant,
@@ -739,25 +818,127 @@ class EngagementViewSet(viewset_for(Engagement)):
             to_status=engagement.status,
             actor=self.request.user,
         )
+        if requested_status == Engagement.Status.ACTIVE:
+            result = transition(
+                model=Engagement,
+                entity_id=engagement.id,
+                machine=ENGAGEMENT,
+                event="activate",
+                tenant=self.request.tenant,
+                actor_type="user",
+                actor_id=str(self.request.user.id),
+                actor_tenant=self.request.tenant,
+                expected_version=engagement.version,
+                mutate=lambda entity: self._approve(entity),
+            )
+            engagement = result.entity
+            serializer.instance = engagement
+            EngagementStatusHistory.all_objects.create(
+                tenant=self.request.tenant,
+                engagement=engagement,
+                from_status=Engagement.Status.DRAFT,
+                to_status=Engagement.Status.ACTIVE,
+                actor=self.request.user,
+            )
         self._audit("engagement.created", engagement)
 
     def perform_update(self, serializer):
-        previous = serializer.instance.status
-        next_status = serializer.validated_data.get("status", previous)
-        if next_status in {Engagement.Status.CLOSED, Engagement.Status.REVOKED} and not serializer.validated_data.get(
-            "closed_reason", serializer.instance.closed_reason
-        ):
-            raise exceptions.ValidationError({"closed_reason": "Closing or revoking requires a reason."})
         super().perform_update(serializer)
-        if next_status != previous:
-            EngagementStatusHistory.all_objects.create(
-                tenant=self.request.tenant,
-                engagement=serializer.instance,
-                from_status=previous,
-                to_status=next_status,
-                reason=serializer.instance.closed_reason,
-                actor=self.request.user,
+
+    def _approve(self, entity):
+        entity.approved_by = self.request.user
+        return ("approved_by",)
+
+    @action(detail=True, methods=["get"], url_path="available-transitions")
+    def available_transitions(self, request, pk=None):
+        engagement = self.get_object()
+        events = ENGAGEMENT.available_events(engagement.status) if has_permission(request, "engagement.manage") else []
+        return Response(
+            {
+                "state": engagement.status,
+                "version": engagement.version,
+                "events": events,
+            }
+        )
+
+    @action(detail=True, methods=["get"])
+    def timeline(self, request, pk=None):
+        engagement = self.get_object()
+        rows = WorkflowTransition.objects.filter(machine=ENGAGEMENT.name, entity_id=engagement.id)
+        return Response(
+            [
+                {
+                    "id": row.id,
+                    "event": row.event,
+                    "from_state": row.from_state,
+                    "to_state": row.to_state,
+                    "actor_type": row.actor_type,
+                    "actor_id": row.actor_id,
+                    "reason": row.reason,
+                    "machine_version": row.machine_version,
+                    "entity_version": row.entity_version_after,
+                    "occurred_at": row.created_at,
+                }
+                for row in rows
+            ]
+        )
+
+    @action(detail=True, methods=["post"])
+    def transition(self, request, pk=None):
+        engagement = self.get_object()
+        idempotency_key = request.headers.get("Idempotency-Key", "")
+        if idempotency_key and WorkflowTransition.objects.filter(
+            machine=ENGAGEMENT.name, entity_id=engagement.id, idempotency_key=idempotency_key
+        ).exists():
+            engagement.refresh_from_db()
+            return Response(SERIALIZERS[Engagement](engagement).data)
+        self._match_version(engagement)
+        event = str(request.data.get("event", ""))
+        reason = str(request.data.get("reason", "")).strip()
+        if event in {"close", "revoke"} and not reason:
+            raise exceptions.ValidationError({"reason": "Closing or revoking requires a reason."})
+        if event not in ENGAGEMENT.available_events(engagement.status):
+            raise exceptions.ValidationError({"event": "This transition is not available."})
+
+        def update_fields(entity):
+            fields = []
+            if event == "activate":
+                entity.approved_by = request.user
+                fields.append("approved_by")
+            if event in {"close", "revoke"}:
+                entity.closed_reason = reason
+                fields.append("closed_reason")
+            return fields
+
+        try:
+            result = transition(
+                model=Engagement,
+                entity_id=engagement.id,
+                machine=ENGAGEMENT,
+                event=event,
+                tenant=request.tenant,
+                actor_type="user",
+                actor_id=str(request.user.id),
+                actor_tenant=request.tenant,
+                expected_version=engagement.version,
+                reason=reason,
+                idempotency_key=idempotency_key,
+                mutate=update_fields,
             )
+        except StaleTransition as exc:
+            raise PreconditionFailed() from exc
+        except InvalidTransition as exc:
+            raise TransitionConflict() from exc
+        if not result.replayed:
+            EngagementStatusHistory.all_objects.create(
+                tenant=request.tenant,
+                engagement=result.entity,
+                from_status=engagement.status,
+                to_status=result.entity.status,
+                reason=reason,
+                actor=request.user,
+            )
+        return Response(SERIALIZERS[Engagement](result.entity).data)
 
     @action(detail=False, methods=["post"], url_path="onboard-auditee")
     def onboard_auditee(self, request):
@@ -928,7 +1109,7 @@ class EngagementViewSet(viewset_for(Engagement)):
         from deployment_assurance.models import DeploymentDecision
         from deployment_assurance.serializers import DeploymentDecisionSerializer
 
-        with engagement_target_context(engagement.auditee_tenant_id, engagement.id):
+        with engagement_target_context(engagement.auditee_tenant_id, engagement.id), transaction.atomic():
             decisions = DeploymentDecision.all_objects.filter(tenant=engagement.auditee_tenant).select_related(
                 "target", "evaluation_run"
             )
@@ -968,13 +1149,38 @@ class EngagementViewSet(viewset_for(Engagement)):
         serializer = AuditorVerdictRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
-        with engagement_target_context(engagement.auditee_tenant_id, engagement.id):
+        event = {
+            AuditorVerdict.Decision.QUERY_RAISED: "raise_query",
+            AuditorVerdict.Decision.COMPLIANT: "mark_compliant",
+            AuditorVerdict.Decision.PARTIAL: "mark_partial",
+            AuditorVerdict.Decision.NONCOMPLIANT: "mark_noncompliant",
+            AuditorVerdict.Decision.NOT_APPLICABLE: "mark_not_applicable",
+        }[data["decision"]]
+        with engagement_target_context(engagement.auditee_tenant_id, engagement.id), transaction.atomic():
             try:
                 control = OrganisationControl.all_objects.get(
                     tenant=engagement.auditee_tenant, pk=data["organisation_control_id"]
                 )
             except OrganisationControl.DoesNotExist as exc:
                 raise exceptions.ValidationError({"organisation_control_id": "No in-scope control exists."}) from exc
+            idempotency_key = request.headers.get("Idempotency-Key", "")
+            if idempotency_key and WorkflowTransition.all_objects.filter(
+                tenant=engagement.auditee_tenant,
+                machine=CONTROL.name,
+                entity_id=control.id,
+                event=event,
+                idempotency_key=idempotency_key,
+            ).exists():
+                verdict = (
+                    AuditorVerdict.all_objects.filter(
+                        tenant=engagement.auditee_tenant,
+                        engagement_id=engagement.id,
+                        organisation_control=control,
+                    )
+                    .order_by("-finalized_at")
+                    .first()
+                )
+                return Response(SERIALIZERS[AuditorVerdict](verdict).data)
             if not self._scope_access(
                 engagement,
                 action_name="auditor_verdict.create",
@@ -1016,14 +1222,30 @@ class EngagementViewSet(viewset_for(Engagement)):
                 finalized_by=request.user,
                 supersedes=previous,
             )
-            control_status = (
-                OrganisationControl.Status.UNDER_REVIEW
-                if data["decision"] == AuditorVerdict.Decision.QUERY_RAISED
-                else data["decision"]
-            )
-            OrganisationControl.all_objects.filter(pk=control.pk).update(
-                status=control_status, last_reviewed_at=timezone.now(), version=control.version + 1
-            )
+            def reviewed(entity):
+                entity.last_reviewed_at = timezone.now()
+                return ("last_reviewed_at",)
+
+            try:
+                transition(
+                    model=OrganisationControl,
+                    entity_id=control.id,
+                    machine=CONTROL,
+                    event=event,
+                    tenant=engagement.auditee_tenant,
+                    actor_type="user",
+                    actor_id=str(request.user.id),
+                    actor_tenant=request.tenant,
+                    engagement_id=engagement.id,
+                    expected_version=control.version,
+                    reason=data["rationale"],
+                    idempotency_key=idempotency_key,
+                    mutate=reviewed,
+                )
+            except StaleTransition as exc:
+                raise PreconditionFailed() from exc
+            except InvalidTransition as exc:
+                raise TransitionConflict() from exc
         return Response(SERIALIZERS[AuditorVerdict](verdict).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"], url_path="unlock-control")
@@ -1044,7 +1266,12 @@ class EngagementViewSet(viewset_for(Engagement)):
             raise exceptions.ValidationError({"detail": "organisation_control_id and reason are required."}) from exc
         if not reason:
             raise exceptions.ValidationError({"reason": "An unlock reason is required."})
-        with engagement_target_context(engagement.auditee_tenant_id, engagement.id):
+        member = EngagementMember.objects.filter(engagement=engagement, user=request.user, is_active=True).first()
+        if request.membership.role not in {Membership.Role.FIRM_ADMIN, Membership.Role.AUDIT_MANAGER} and (
+            member is None or member.role != EngagementMember.Role.LEAD
+        ):
+            raise exceptions.PermissionDenied("Only an audit manager or lead auditor can unlock a control.")
+        with engagement_target_context(engagement.auditee_tenant_id, engagement.id), transaction.atomic():
             previous = (
                 AuditorVerdict.all_objects.filter(
                     tenant=engagement.auditee_tenant,
@@ -1055,6 +1282,15 @@ class EngagementViewSet(viewset_for(Engagement)):
                 .first()
             )
             if previous is None or not previous.locked:
+                idempotency_key = request.headers.get("Idempotency-Key", "")
+                if previous and idempotency_key and WorkflowTransition.all_objects.filter(
+                    tenant=engagement.auditee_tenant,
+                    machine=CONTROL.name,
+                    entity_id=control_id,
+                    event="reopen",
+                    idempotency_key=idempotency_key,
+                ).exists():
+                    return Response(SERIALIZERS[AuditorVerdict](previous).data)
                 raise exceptions.ValidationError({"control": "The control is not locked."})
             if not self._scope_access(
                 engagement,
@@ -1064,6 +1300,26 @@ class EngagementViewSet(viewset_for(Engagement)):
                 allowed=self._control_in_scope(engagement, previous.organisation_control),
             ):
                 return self._access_denied("The object is outside the engagement scope.")
+            control = previous.organisation_control
+            try:
+                transition(
+                    model=OrganisationControl,
+                    entity_id=control.id,
+                    machine=CONTROL,
+                    event="reopen",
+                    tenant=engagement.auditee_tenant,
+                    actor_type="user",
+                    actor_id=str(request.user.id),
+                    actor_tenant=request.tenant,
+                    engagement_id=engagement.id,
+                    expected_version=control.version,
+                    reason=reason,
+                    idempotency_key=request.headers.get("Idempotency-Key", ""),
+                )
+            except StaleTransition as exc:
+                raise PreconditionFailed() from exc
+            except InvalidTransition as exc:
+                raise TransitionConflict() from exc
             unlocked = AuditorVerdict.all_objects.create(
                 tenant=engagement.auditee_tenant,
                 engagement_id=engagement.id,

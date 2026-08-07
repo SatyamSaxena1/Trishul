@@ -151,6 +151,25 @@ def test_idempotency_key_replays_the_original_run(target, object_store):
         assert EvaluationRun.objects.count() == 1
 
 
+def test_evaluation_can_be_cancelled_with_version_and_idempotency(target, object_store):
+    client = APIClient()
+    token = issue(target.tenant, CI_SCOPES)
+    snapshot_id = upload(client, token, target).json()["id"]
+    run_id = client.post(
+        f"{BASE}/deployment-snapshots/{snapshot_id}/evaluations/", {}, format="json", **auth(token)
+    ).json()["evaluation_run_id"]
+    url = f"{BASE}/evaluation-runs/{run_id}/transition/"
+
+    available = client.get(f"{BASE}/evaluation-runs/{run_id}/available-transitions/", **auth(token))
+    assert available.json()["events"] == ["cancel"]
+    assert client.post(url, {"event": "cancel"}, format="json", **auth(token)).status_code == 428
+    headers = {**auth(token), "HTTP_IF_MATCH": str(available.json()["version"]), "HTTP_IDEMPOTENCY_KEY": "cancel-1"}
+    cancelled = client.post(url, {"event": "cancel", "reason": "Superseded build."}, format="json", **headers)
+    replay = client.post(url, {"event": "cancel", "reason": "Superseded build."}, format="json", **headers)
+    assert cancelled.status_code == replay.status_code == 200
+    assert cancelled.json()["state"] == replay.json()["state"] == EvaluationRun.State.CANCELLED
+
+
 def test_unsupported_source_type_is_rejected(target, object_store):
     client = APIClient()
     token = issue(target.tenant, CI_SCOPES)

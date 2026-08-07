@@ -111,7 +111,7 @@ TenantBrandingSerializer = serializer_for(TenantBranding)
 TenantInvitationSerializer = serializer_for(
     TenantInvitation, read_only_fields=("target_tenant", "invited_by", "accepted_at")
 )
-EngagementSerializer = serializer_for(Engagement, read_only_fields=("created_by", "approved_by"))
+EngagementSerializer = serializer_for(Engagement, read_only_fields=("status", "created_by", "approved_by"))
 EngagementScopeSerializer = serializer_for(EngagementScope)
 EngagementMemberSerializer = serializer_for(EngagementMember)
 EngagementStatusHistorySerializer = serializer_for(
@@ -133,7 +133,7 @@ FrameworkSerializer = serializer_for(Framework)
 UnifiedControlObjectiveSerializer = serializer_for(UnifiedControlObjective)
 FrameworkControlMappingSerializer = serializer_for(FrameworkControlMapping)
 EvidenceRequirementSerializer = serializer_for(EvidenceRequirement)
-OrganisationControlSerializer = serializer_for(OrganisationControl)
+OrganisationControlSerializer = serializer_for(OrganisationControl, read_only_fields=("status", "last_reviewed_at"))
 ControlAssignmentSerializer = serializer_for(ControlAssignment)
 ControlEvidenceLinkSerializer = serializer_for(
     ControlEvidenceLink, read_only_fields=tuple(field.name for field in ControlEvidenceLink._meta.fields)
