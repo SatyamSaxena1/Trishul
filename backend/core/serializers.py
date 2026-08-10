@@ -139,7 +139,33 @@ ControlEvidenceLinkSerializer = serializer_for(
     ControlEvidenceLink, read_only_fields=tuple(field.name for field in ControlEvidenceLink._meta.fields)
 )
 AssessmentSerializer = serializer_for(Assessment)
-EvidenceSerializer = serializer_for(Evidence, read_only_fields=("immutable",))
+class EvidenceSerializer(TenantModelSerializer):
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Evidence
+        fields = "__all__"
+        read_only_fields = (
+            "tenant",
+            "version",
+            "created_at",
+            "updated_at",
+            "immutable",
+            "evidence_version",
+            "status",
+            "supersedes",
+        )
+
+    def get_status(self, obj):
+        return "superseded" if obj.superseded_by.exists() else "current"
+
+
+class EvidenceReplacementSerializer(TenantModelSerializer):
+    class Meta:
+        model = Evidence
+        fields = ("title", "source", "evidence_date", "object_key", "sha256", "classification")
+
+
 ComplianceGapSerializer = serializer_for(ComplianceGap)
 AssessmentEvidenceSerializer = serializer_for(AssessmentEvidence)
 RiskSerializer = serializer_for(Risk)

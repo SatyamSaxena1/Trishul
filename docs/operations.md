@@ -87,6 +87,17 @@ Apply [the AWS Terraform foundation](../deploy/aws/README.md), create the non-by
 
 The shared tier uses one database and bucket with forced RLS and tenant-prefixed objects. The enterprise tier requires separate database, bucket, and KMS resources. The dedicated tier uses the customer-hosted Compose or Kubernetes profile. Moving a tenant between tiers is an operator-controlled export/import, not an in-place toggle.
 
+### Evidence versions
+
+Create the initial evidence record with `POST /api/v1/evidence/`. Create a replacement with
+`POST /api/v1/evidence/{id}/supersede/`; the server fixes the assessment, successor link and next
+version number. Evidence lifecycle fields supplied by a client are ignored, and existing records
+cannot be updated or deleted. Each replacement must reference a different immutable object key.
+
+These endpoints register object references; they do not upload bytes. Until the safe-upload slice
+lands, operators and connectors must write a tenant-prefixed, non-overwriting object before
+registering it and must rely on bucket versioning and retention controls.
+
 ## SaaS runbooks
 
 ### Disaster recovery

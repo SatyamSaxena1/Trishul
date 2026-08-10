@@ -790,6 +790,32 @@ class Evidence(TenantScopedModel):
         "self", on_delete=models.PROTECT, null=True, blank=True, related_name="superseded_by"
     )
 
+    class Meta:
+        base_manager_name = "all_objects"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supersedes"],
+                condition=models.Q(supersedes__isnull=False),
+                name="evidence_single_successor_uniq",
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.supersedes_id:
+            if self.evidence_version != 1:
+                raise ValidationError({"evidence_version": "Initial evidence must be version 1."})
+            return
+        previous = Evidence.all_objects.filter(pk=self.supersedes_id).first()
+        if not previous:
+            raise ValidationError({"supersedes": "The superseded evidence does not exist."})
+        if previous.assessment_id != self.assessment_id:
+            raise ValidationError({"assessment": "A successor must remain in the same assessment."})
+        if self.evidence_version != previous.evidence_version + 1:
+            raise ValidationError({"evidence_version": "A successor must use the next evidence version."})
+        if self.object_key == previous.object_key:
+            raise ValidationError({"object_key": "A successor must use a new immutable object key."})
+
     def save(self, *args, **kwargs):
         if self.pk and Evidence.all_objects.filter(pk=self.pk).exists():
             raise ValidationError("Evidence is immutable; create a superseding version.")

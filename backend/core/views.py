@@ -92,6 +92,7 @@ from .serializers import (
     AuditeeOnboardingSerializer,
     AuditFirmOnboardingSerializer,
     AuditorVerdictRequestSerializer,
+    EvidenceReplacementSerializer,
     TenantSummarySerializer,
 )
 from .storage import healthcheck as storage_healthcheck
@@ -371,6 +372,26 @@ class ServiceAccountViewSet(viewset_for(ServiceAccount)):
         account.save(update_fields=["revoked_at", "version", "updated_at"])
         self._audit("revoked", account)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
+    @action(detail=True, methods=["post"])
+    def supersede(self, request, pk=None):
+        previous = self.get_object()
+        replacement = EvidenceReplacementSerializer(data=request.data)
+        replacement.is_valid(raise_exception=True)
+        with transaction.atomic():
+            previous = Evidence.objects.select_for_update().get(pk=previous.pk)
+            if Evidence.objects.filter(supersedes=previous).exists():
+                raise exceptions.ValidationError("Evidence has already been superseded.")
+            current = replacement.save(
+                tenant=request.tenant,
+                assessment=previous.assessment,
+                evidence_version=previous.evidence_version + 1,
+                supersedes=previous,
+            )
+            self._audit("superseded", current)
+        return Response(self.get_serializer(current).data, status=status.HTTP_201_CREATED)
 
 
 class RepositoryViewSet(viewset_for(Repository)):
@@ -1454,7 +1475,7 @@ MODEL_VIEWSETS = {
     "assessments": viewset_for(Assessment),
     "assessment-responses": AssessmentResponseViewSet,
     "assessment-evidence": viewset_for(AssessmentEvidence, immutable=True),
-    "evidence": viewset_for(Evidence, immutable=True),
+    "evidence": EvidenceViewSet,
     "compliance-gaps": viewset_for(ComplianceGap),
     "risks": RiskViewSet,
     "risk-links": viewset_for(RiskLink),

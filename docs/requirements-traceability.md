@@ -1,6 +1,6 @@
 # Concept-note requirements traceability
 
-Baseline: `agent/workflow-state-machines` at `8e5704f` on 10 August 2026.
+Baseline: `main` at `6324a59` on 10 August 2026, plus the active evidence-versioning slice.
 
 Status is deliberately conservative: **implemented** means a usable, tested path;
 **partial** means a schema, API, or narrow path exists; **planned** means no
@@ -14,7 +14,7 @@ the GRC/TPRM programme, not a compliance attestation.
 | M1 tenancy, identity and onboarding | Partial | Tenant/RLS/membership/engagement models and OIDC | SAML, SCIM, tenant IdP configuration, session controls, full persona journeys |
 | M2 UCF and mappings | Partial | Versioned framework, requirement, UCO, mapping and delta models | Expert-approved ISO and DPDP packs, pack review/diff and instantiation |
 | M3 scope and assets | Partial | Organisation, workspace and application records | Entities, locations, assets, ownership and applicability wizard |
-| M4 evidence | Partial | Immutable evidence records, hashes and object storage | Safe upload, extraction, classification, attributes, quality, version propagation |
+| M4 evidence | Partial | Immutable evidence records, hashes, append-only supersession API and object storage | Safe object upload, extraction, classification, attributes, quality and version propagation |
 | M5 evidence intelligence and reuse | Planned | AI gateway/run records only | Retrieval, freshness/scope/sufficiency, cited proposal and human approval |
 | M6 scoring | Partial | Risk scores and limited status counts | Configurable scores, caps, snapshots, drill-down and trends |
 | M7 policy lifecycle | Planned | Deployment policy packs are not GRC policies | Authoring, approval, publication, attestation and expiry |
@@ -33,7 +33,7 @@ the GRC/TPRM programme, not a compliance attestation.
 | --- | --- | --- | --- |
 | BR-53 | Control Owners can access only active assignments. | Implemented | API read/write denial after assignment removal and expiry. |
 | BR-54 | Audit firms require a live, scoped engagement. | Implemented | Active, closed, revoked and expired engagement tests. |
-| BR-55 | Evidence is never overwritten. | Partial | Immutable upload/version API and database tests. |
+| BR-55 | Evidence is never overwritten. | Partial | Append-only version API and model/database constraint tests exist; add safe object upload and PostgreSQL trigger integration evidence. |
 | BR-56 | Superseded evidence is independently revalidated on every link. | Planned | Reuse propagation and gap/task idempotency tests. |
 | BR-57 | Locked controls are excluded from automatic propagation. | Partial | Auditor verdict lock exists; propagation/notification test required. |
 | BR-58 | Auditor-closed controls become auditee read-only. | Partial | Enforce every evidence/control write path, not only verdict API. |
