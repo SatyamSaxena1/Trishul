@@ -28,6 +28,7 @@ from .ai_gateway import GatewayPolicyError, invoke
 from .archive import UnsafeArchive, inspect_archive
 from .entitlements import EntitlementDenied, enforce, record_usage
 from .evidence_intelligence import analyse
+from .evidence_reuse import evaluate_evidence
 from .models import (
     AIAnalysisRun,
     Application,
@@ -49,7 +50,9 @@ from .models import (
     EngagementScope,
     EngagementStatusHistory,
     Evidence,
+    EvidenceQualityOverride,
     EvidenceRequirement,
+    EvidenceReuseEvaluation,
     Finding,
     FindingEvidence,
     Framework,
@@ -60,6 +63,7 @@ from .models import (
     ModelConfiguration,
     OrganisationControl,
     Organization,
+    PostClosureEvidenceChange,
     PromptVersion,
     Remediation,
     Report,
@@ -162,6 +166,9 @@ PERMISSION_PREFIX = {
     AssessmentResponse: "assessment",
     AssessmentEvidence: "evidence",
     Evidence: "evidence",
+    EvidenceReuseEvaluation: "evidence",
+    EvidenceQualityOverride: "evidence",
+    PostClosureEvidenceChange: "evidence",
     ComplianceGap: "assessment",
     Risk: "risk",
     RiskLink: "risk",
@@ -197,6 +204,9 @@ APPLICATION_PATH = {
     ControlAssignment: "organisation_control__application_id",
     ControlEvidenceLink: "organisation_control__application_id",
     Evidence: "assessment__application_id",
+    EvidenceReuseEvaluation: "organisation_control__application_id",
+    EvidenceQualityOverride: "evidence__assessment__application_id",
+    PostClosureEvidenceChange: "organisation_control__application_id",
     AssessmentResponse: "assessment__application_id",
     AssessmentEvidence: "response__assessment__application_id",
     ComplianceGap: "response__assessment__application_id",
@@ -261,6 +271,31 @@ def related_application_id(value):
     return getattr(current, "id", current)
 
 
+def locked_controls(value):
+    control = getattr(value, "organisation_control", None)
+    if isinstance(value, OrganisationControl):
+        control = value
+    if control:
+        return [control]
+    response = value.response if isinstance(value, AssessmentEvidence) else value
+    if isinstance(response, AssessmentResponse):
+        uco_ids = response.requirement.control_mappings.values_list("unified_control_id", flat=True)
+        return list(
+            OrganisationControl.objects.filter(
+                application=response.assessment.application, unified_control_id__in=uco_ids
+            )
+        )
+    return []
+
+
+def ensure_controls_unlocked(values):
+    for value in values:
+        for control in locked_controls(value):
+            verdict = control.auditor_verdicts.order_by("-finalized_at").first()
+            if verdict and verdict.locked:
+                raise exceptions.PermissionDenied("The auditor-locked control must be unlocked before it can change.")
+
+
 class TenantModelViewSet(viewsets.ModelViewSet):
     model = None
     serializer_class = None
@@ -315,6 +350,7 @@ class TenantModelViewSet(viewsets.ModelViewSet):
             self.model is Application or any(application_id not in restrictions for application_id in related_ids)
         ):
             raise exceptions.PermissionDenied("Application scope does not permit this operation.")
+        ensure_controls_unlocked(serializer.validated_data.values())
         if self.model is RiskAcceptance:
             if isinstance(self.request.user, ServicePrincipal):
                 raise exceptions.PermissionDenied("Service accounts cannot request risk acceptance.")
@@ -334,6 +370,7 @@ class TenantModelViewSet(viewsets.ModelViewSet):
             raise exceptions.MethodNotAllowed(self.request.method, "Resource is immutable.")
         with transaction.atomic():
             instance = self.model.objects.select_for_update().get(pk=serializer.instance.pk)
+            ensure_controls_unlocked([instance, *serializer.validated_data.values()])
             self._match_version(instance)
             serializer.instance = instance
             updated = serializer.save(version=instance.version + 1)
@@ -344,6 +381,7 @@ class TenantModelViewSet(viewsets.ModelViewSet):
             raise exceptions.MethodNotAllowed(self.request.method, "Resource is immutable.")
         with transaction.atomic():
             instance = self.model.objects.select_for_update().get(pk=instance.pk)
+            ensure_controls_unlocked([instance])
             self._match_version(instance)
             self._audit("deleted", instance)
             instance.delete()
@@ -378,6 +416,67 @@ class ServiceAccountViewSet(viewset_for(ServiceAccount)):
 
 
 class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
+    def get_required_permission(self):
+        if self.action == "quality_override":
+            return "evidence.read"
+        if getattr(self.request.membership, "role", None) == Membership.Role.CONTROL_OWNER:
+            return "evidence.assigned"
+        return super().get_required_permission()
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if getattr(self.request.membership, "role", None) == Membership.Role.CONTROL_OWNER:
+            application_ids = OrganisationControl.objects.filter(
+                assignments__assignee=self.request.user, assignments__is_active=True
+            ).values_list("application_id", flat=True)
+            return queryset.filter(assessment__application_id__in=application_ids)
+        return queryset
+
+    def perform_create(self, serializer):
+        serializer.save(
+            tenant=self.request.tenant,
+            submitted_by=None if isinstance(self.request.user, ServicePrincipal) else self.request.user,
+        )
+        self._audit("created", serializer.instance)
+
+    @action(detail=True, methods=["post"], url_path="reuse-evaluations")
+    def reuse_evaluations(self, request, pk=None):
+        actor_type, actor_id = actor(request)
+        evaluations = evaluate_evidence(self.get_object(), actor_type=actor_type, actor_id=actor_id)
+        return Response(SERIALIZERS[EvidenceReuseEvaluation](evaluations, many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="quality-overrides")
+    def quality_override(self, request, pk=None):
+        evidence = self.get_object()
+        if isinstance(request.user, ServicePrincipal) or request.membership.role not in {
+            Membership.Role.FIRM_ADMIN,
+            Membership.Role.AUDIT_MANAGER,
+            Membership.Role.COMPLIANCE_MANAGER,
+            Membership.Role.CISO,
+        }:
+            raise exceptions.PermissionDenied("This role cannot authorize an evidence-quality override.")
+        justification = str(request.data.get("justification", "")).strip()
+        if not justification:
+            raise exceptions.ValidationError({"justification": "A quality override justification is required."})
+        override = EvidenceQualityOverride.objects.create(
+            tenant=request.tenant,
+            evidence=evidence,
+            justification=justification,
+            original_score=evidence.quality_score,
+            configured_threshold=evidence.quality_threshold,
+            authorized_by=request.user,
+        )
+        AuditEvent.append(
+            tenant=request.tenant,
+            actor_type="user",
+            actor_id=str(request.user.id),
+            action="evidence.quality_overridden",
+            resource_type="core.evidencequalityoverride",
+            resource_id=override.id,
+            details={"evidence_id": str(evidence.id)},
+        )
+        return Response(SERIALIZERS[EvidenceQualityOverride](override).data, status=status.HTTP_201_CREATED)
+
     def _save_upload(self, serializer, *, previous=None):
         values = dict(serializer.validated_data)
         uploaded = values.pop("file")
@@ -417,6 +516,7 @@ class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
             quality_profile_version=intelligence["quality_profile_version"],
             evidence_version=previous.evidence_version + 1 if previous else 1,
             supersedes=previous,
+            submitted_by=None if isinstance(self.request.user, ServicePrincipal) else self.request.user,
             **values,
         )
 
@@ -450,11 +550,22 @@ class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
                     assessment=previous.assessment,
                     evidence_version=previous.evidence_version + 1,
                     supersedes=previous,
+                    submitted_by=None if isinstance(request.user, ServicePrincipal) else request.user,
                 )
+            AssessmentEvidence.objects.bulk_create(
+                [
+                    AssessmentEvidence(tenant=request.tenant, response_id=response_id, evidence=current)
+                    for response_id in AssessmentEvidence.objects.filter(evidence=previous).values_list(
+                        "response_id", flat=True
+                    )
+                ]
+            )
             self._audit("superseded", current)
             if upload:
                 self._audit("evidence.extracted", current)
                 self._audit("evidence.quality_scored", current)
+            actor_type, actor_id = actor(request)
+            evaluate_evidence(current, actor_type=actor_type, actor_id=actor_id)
         return Response(self.get_serializer(current).data, status=status.HTTP_201_CREATED)
 
 
@@ -608,24 +719,84 @@ class AssessmentViewSet(viewset_for(Assessment)):
     @action(detail=True, methods=["get"])
     def score(self, request, pk=None):
         assessment = self.get_object()
-        counts = {
-            row["decision"]: row["total"]
-            for row in assessment.responses.values("decision").annotate(total=models.Count("id"))
+        weights = {"critical": 3, "high": 2, "medium": 1.5, "low": 1}
+        values = {"compliant": 1, "partially_compliant": 0.5, "noncompliant": 0, "not_assessed": 0}
+        contributions = []
+        numerator = denominator = 0
+        critical_failure = False
+        response_by_requirement = {
+            item.requirement_id: item for item in assessment.responses.select_related("requirement")
         }
-        excluded = counts.get(AssessmentResponse.Decision.NOT_APPLICABLE, 0)
-        applicable = sum(counts.values()) - excluded
-        points = (
-            counts.get(AssessmentResponse.Decision.COMPLIANT, 0) * 100
-            + counts.get(AssessmentResponse.Decision.PARTIAL, 0) * 50
-        )
-        score = f"{points / applicable:.2f}" if applicable else None
+        requirements = assessment.framework_version.requirements.prefetch_related("control_mappings__unified_control")
+        for requirement in requirements:
+            mapping = requirement.control_mappings.first()
+            control = (
+                OrganisationControl.objects.filter(
+                    application=assessment.application, unified_control=mapping.unified_control
+                ).first()
+                if mapping
+                else None
+            )
+            verdict = control.auditor_verdicts.order_by("-finalized_at").first() if control else None
+            response = response_by_requirement.get(requirement.id)
+            response_decision = (
+                {
+                    "compliant": "compliant",
+                    "partial": "partially_compliant",
+                    "noncompliant": "noncompliant",
+                    "not_applicable": "not_applicable",
+                }.get(response.decision, "not_assessed")
+                if response
+                else "not_assessed"
+            )
+            decision = verdict.decision if verdict else response_decision
+            weight = weights[requirement.criticality]
+            excluded = decision == AuditorVerdict.Decision.NOT_APPLICABLE
+            if not excluded:
+                denominator += weight
+                numerator += weight * values[decision]
+            critical_failure |= requirement.criticality == "critical" and decision == "noncompliant"
+            link = control.evidence_links.order_by("-created_at").first() if control else None
+            evaluation = (
+                EvidenceReuseEvaluation.objects.filter(pk=link.source_id).first()
+                if link and link.source_type == "reuse_evaluation"
+                else None
+            )
+            contributions.append(
+                {
+                    "requirement_id": str(requirement.id),
+                    "control_id": requirement.control_id,
+                    "criticality": requirement.criticality,
+                    "weight": weight,
+                    "decision": decision,
+                    "excluded": excluded,
+                    "points": 0 if excluded else weight * values[decision],
+                    "human_verdict_id": str(verdict.id) if verdict else None,
+                    "organisation_control_id": str(control.id) if control else None,
+                    "evidence_link_id": str(link.id) if link else None,
+                    "reuse_evaluation_id": str(evaluation.id) if evaluation else None,
+                    "evidence_id": str(link.evidence_id) if link else None,
+                    "evidence_version": link.evidence.evidence_version if link and link.evidence else None,
+                }
+            )
+        raw_score = numerator / denominator * 100 if denominator else None
+        profile = TenantEntitlement.objects.filter(code="compliance_scoring", enabled=True).first()
+        cap = float(profile.configuration.get("critical_noncompliant_cap", 70)) if profile else 70
+        final_score = min(raw_score, cap) if raw_score is not None and critical_failure else raw_score
+        counts = {}
+        for item in contributions:
+            counts[item["decision"]] = counts.get(item["decision"], 0) + 1
         return Response(
             {
                 "assessment_id": str(assessment.id),
-                "score": score,
-                "applicable_responses": applicable,
-                "excluded_not_applicable": excluded,
+                "score": f"{final_score:.2f}" if final_score is not None else None,
+                "raw_score": f"{raw_score:.2f}" if raw_score is not None else None,
+                "critical_cap_applied": critical_failure,
+                "critical_cap": f"{cap:.2f}",
+                "applicable_responses": sum(counts.values()) - counts.get("not_applicable", 0),
+                "excluded_not_applicable": counts.get("not_applicable", 0),
                 "counts": counts,
+                "contributions": contributions,
             }
         )
 
@@ -784,10 +955,14 @@ class OrganisationControlViewSet(viewset_for(OrganisationControl)):
     @action(detail=True, methods=["post"])
     def transition(self, request, pk=None):
         control = self.get_object()
+        ensure_controls_unlocked([control])
         idempotency_key = request.headers.get("Idempotency-Key", "")
-        if idempotency_key and WorkflowTransition.objects.filter(
-            machine=CONTROL.name, entity_id=control.id, idempotency_key=idempotency_key
-        ).exists():
+        if (
+            idempotency_key
+            and WorkflowTransition.objects.filter(
+                machine=CONTROL.name, entity_id=control.id, idempotency_key=idempotency_key
+            ).exists()
+        ):
             control.refresh_from_db()
             return Response(SERIALIZERS[OrganisationControl](control).data)
         self._match_version(control)
@@ -998,9 +1173,12 @@ class EngagementViewSet(viewset_for(Engagement)):
     def transition(self, request, pk=None):
         engagement = self.get_object()
         idempotency_key = request.headers.get("Idempotency-Key", "")
-        if idempotency_key and WorkflowTransition.objects.filter(
-            machine=ENGAGEMENT.name, entity_id=engagement.id, idempotency_key=idempotency_key
-        ).exists():
+        if (
+            idempotency_key
+            and WorkflowTransition.objects.filter(
+                machine=ENGAGEMENT.name, entity_id=engagement.id, idempotency_key=idempotency_key
+            ).exists()
+        ):
             engagement.refresh_from_db()
             return Response(SERIALIZERS[Engagement](engagement).data)
         self._match_version(engagement)
@@ -1206,6 +1384,61 @@ class EngagementViewSet(viewset_for(Engagement)):
             not controls or control.unified_control.code in controls
         )
 
+    @action(detail=True, methods=["get"], url_path="control-reviews")
+    def control_reviews(self, request, pk=None):
+        engagement = self.get_object()
+        if not self._access(
+            engagement,
+            action_name="auditor_review.read",
+            object_type="core.organisationcontrol",
+        ):
+            return self._access_denied()
+        with engagement_target_context(engagement.auditee_tenant_id, engagement.id):
+            controls = OrganisationControl.all_objects.filter(tenant=engagement.auditee_tenant).select_related(
+                "unified_control"
+            )
+            controls = [control for control in controls if self._control_in_scope(engagement, control)]
+            payload = []
+            for control in controls:
+                evaluations = control.reuse_evaluations.select_related("evidence", "requirement", "mapping").order_by(
+                    "created_at"
+                )
+                verdict = control.auditor_verdicts.order_by("-finalized_at").first()
+                payload.append(
+                    {
+                        "organisation_control": SERIALIZERS[OrganisationControl](control).data,
+                        "uco": SERIALIZERS[UnifiedControlObjective](control.unified_control).data,
+                        "requirements": [
+                            {
+                                "id": str(item.requirement_id),
+                                "control_id": item.requirement.control_id,
+                                "testing_guidance": item.requirement.testing_guidance,
+                                "criticality": item.requirement.criticality,
+                            }
+                            for item in evaluations
+                        ],
+                        "system_evidence_verdicts": SERIALIZERS[EvidenceReuseEvaluation](evaluations, many=True).data,
+                        "evidence": [
+                            {
+                                **SERIALIZERS[Evidence](item.evidence).data,
+                                "quality_override": SERIALIZERS[EvidenceQualityOverride](
+                                    item.evidence.quality_overrides.order_by("-authorized_at").first()
+                                ).data
+                                if item.evidence.quality_overrides.exists()
+                                else None,
+                            }
+                            for item in evaluations
+                        ],
+                        "gaps": SERIALIZERS[ComplianceGap](control.gaps.order_by("created_at"), many=True).data,
+                        "human_auditor_verdict": SERIALIZERS[AuditorVerdict](verdict).data if verdict else None,
+                        "locked": bool(verdict and verdict.locked),
+                        "pending_post_closure_changes": SERIALIZERS[PostClosureEvidenceChange](
+                            control.post_closure_evidence_changes.filter(status="pending"), many=True
+                        ).data,
+                    }
+                )
+        return Response(payload)
+
     @action(detail=True, methods=["get"], url_path="assurance-results")
     def assurance_results(self, request, pk=None):
         engagement = self.get_object()
@@ -1275,13 +1508,16 @@ class EngagementViewSet(viewset_for(Engagement)):
             except OrganisationControl.DoesNotExist as exc:
                 raise exceptions.ValidationError({"organisation_control_id": "No in-scope control exists."}) from exc
             idempotency_key = request.headers.get("Idempotency-Key", "")
-            if idempotency_key and WorkflowTransition.all_objects.filter(
-                tenant=engagement.auditee_tenant,
-                machine=CONTROL.name,
-                entity_id=control.id,
-                event=event,
-                idempotency_key=idempotency_key,
-            ).exists():
+            if (
+                idempotency_key
+                and WorkflowTransition.all_objects.filter(
+                    tenant=engagement.auditee_tenant,
+                    machine=CONTROL.name,
+                    entity_id=control.id,
+                    event=event,
+                    idempotency_key=idempotency_key,
+                ).exists()
+            ):
                 verdict = (
                     AuditorVerdict.all_objects.filter(
                         tenant=engagement.auditee_tenant,
@@ -1300,6 +1536,20 @@ class EngagementViewSet(viewset_for(Engagement)):
                 allowed=self._control_in_scope(engagement, control),
             ):
                 return self._access_denied("The object is outside the engagement scope.")
+            if control.evidence_links.filter(evidence__submitted_by=request.user).exists():
+                with tenant_context(request.tenant.id):
+                    CrossTenantAccessEvent.all_objects.create(
+                        tenant=request.tenant,
+                        target_tenant=engagement.auditee_tenant,
+                        engagement=engagement,
+                        subject_id=str(request.user.id),
+                        object_type="core.organisationcontrol",
+                        object_id=str(control.id),
+                        action="auditor_verdict.create",
+                        decision="deny",
+                        reason="evidence_submitter_separation_of_duties",
+                    )
+                return self._access_denied("An evidence submitter cannot record its auditor verdict.")
             previous = (
                 AuditorVerdict.all_objects.filter(
                     tenant=engagement.auditee_tenant,
@@ -1333,6 +1583,7 @@ class EngagementViewSet(viewset_for(Engagement)):
                 finalized_by=request.user,
                 supersedes=previous,
             )
+
             def reviewed(entity):
                 entity.last_reviewed_at = timezone.now()
                 return ("last_reviewed_at",)
@@ -1394,13 +1645,17 @@ class EngagementViewSet(viewset_for(Engagement)):
             )
             if previous is None or not previous.locked:
                 idempotency_key = request.headers.get("Idempotency-Key", "")
-                if previous and idempotency_key and WorkflowTransition.all_objects.filter(
-                    tenant=engagement.auditee_tenant,
-                    machine=CONTROL.name,
-                    entity_id=control_id,
-                    event="reopen",
-                    idempotency_key=idempotency_key,
-                ).exists():
+                if (
+                    previous
+                    and idempotency_key
+                    and WorkflowTransition.all_objects.filter(
+                        tenant=engagement.auditee_tenant,
+                        machine=CONTROL.name,
+                        entity_id=control_id,
+                        event="reopen",
+                        idempotency_key=idempotency_key,
+                    ).exists()
+                ):
                     return Response(SERIALIZERS[AuditorVerdict](previous).data)
                 raise exceptions.ValidationError({"control": "The control is not locked."})
             if not self._scope_access(
@@ -1566,6 +1821,9 @@ MODEL_VIEWSETS = {
     "assessment-responses": AssessmentResponseViewSet,
     "assessment-evidence": viewset_for(AssessmentEvidence, immutable=True),
     "evidence": EvidenceViewSet,
+    "evidence-reuse-evaluations": readonly_viewset_for(EvidenceReuseEvaluation),
+    "evidence-quality-overrides": readonly_viewset_for(EvidenceQualityOverride),
+    "post-closure-evidence-changes": readonly_viewset_for(PostClosureEvidenceChange),
     "compliance-gaps": viewset_for(ComplianceGap),
     "risks": RiskViewSet,
     "risk-links": viewset_for(RiskLink),

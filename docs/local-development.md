@@ -28,4 +28,13 @@ npm run dev
 
 Open `http://localhost:5173` and choose a persona. The selector creates no shortcut around authorization: it supplies a seeded Django user identity, while the normal tenant membership, permission, RLS, engagement, workflow, assignment, separation-of-duties, and audit code continues to run.
 
+`seed_dev` also loads the legally safe MVP reference pack: an ISO-like access-control requirement and a PCI-like password requirement share `UCO-DEV-IAM-001`; the latter adds the demonstration delta `password_minimum_length >= 12`. These records are explicitly marked as demonstration content with expert verification pending.
+
+To run the complete automated local MVP journey (distinct control-owner, compliance-manager, auditor, audit-manager, CISO, and platform personas):
+
+```powershell
+cd C:\Users\satya\Trishul
+.\.venv\Scripts\pytest.exe backend\core\tests\test_mvp_lifecycle.py -q
+```
+
 To return to production-style OIDC locally, stop the servers, set `TRISHUL_DEV_AUTH=false`, configure the existing OIDC variables, and restart. Production OIDC behavior is unchanged.

@@ -612,10 +612,18 @@ class Framework(TenantScopedModel):
 
 
 class Requirement(TenantScopedModel):
+    class Criticality(models.TextChoices):
+        CRITICAL = "critical", "Critical"
+        HIGH = "high", "High"
+        MEDIUM = "medium", "Medium"
+        LOW = "low", "Low"
+
     framework_version = models.ForeignKey(FrameworkVersion, on_delete=models.PROTECT, related_name="requirements")
     control_id = models.CharField(max_length=80)
     title = models.CharField(max_length=300)
     requirement = models.TextField(max_length=12000)
+    criticality = models.CharField(max_length=20, choices=Criticality.choices, default=Criticality.MEDIUM)
+    testing_guidance = models.TextField(max_length=4000, blank=True)
 
     class Meta:
         constraints = [
@@ -773,6 +781,9 @@ class Assessment(TenantScopedModel):
     framework_version = models.ForeignKey(FrameworkVersion, on_delete=models.PROTECT)
     name = models.CharField(max_length=200)
     status = models.CharField(max_length=30, default="draft")
+    audit_period_start = models.DateField(null=True, blank=True)
+    audit_period_end = models.DateField(null=True, blank=True)
+    scope = models.JSONField(default=dict, blank=True)
 
 
 class Evidence(TenantScopedModel):
@@ -799,6 +810,9 @@ class Evidence(TenantScopedModel):
     status = models.CharField(max_length=20, default="current")
     supersedes = models.ForeignKey(
         "self", on_delete=models.PROTECT, null=True, blank=True, related_name="superseded_by"
+    )
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="submitted_evidence"
     )
 
     class Meta:
@@ -834,6 +848,48 @@ class Evidence(TenantScopedModel):
 
     def delete(self, *args, **kwargs):
         raise ValidationError("Evidence is immutable.")
+
+
+class EvidenceReuseEvaluation(ImmutableTenantRecord):
+    class Outcome(models.TextChoices):
+        ACCEPT = "accept", "Accept"
+        ACCEPT_REVIEW_SUGGESTED = "accept_review_suggested", "Accept, review suggested"
+        PARTIAL = "partial", "Partial"
+        REJECT_STALE = "reject_stale", "Reject: stale"
+        REJECT_OUT_OF_SCOPE = "reject_out_of_scope", "Reject: out of scope"
+        REJECT_INSUFFICIENT = "reject_insufficient", "Reject: insufficient"
+        REJECT_LOW_QUALITY = "reject_low_quality", "Reject: low quality"
+        DUPLICATE = "duplicate", "Duplicate"
+
+    evidence = models.ForeignKey(Evidence, on_delete=models.PROTECT, related_name="reuse_evaluations")
+    organisation_control = models.ForeignKey(
+        OrganisationControl, on_delete=models.PROTECT, related_name="reuse_evaluations"
+    )
+    requirement = models.ForeignKey(Requirement, on_delete=models.PROTECT, related_name="reuse_evaluations")
+    unified_control = models.ForeignKey(
+        UnifiedControlObjective, on_delete=models.PROTECT, related_name="reuse_evaluations"
+    )
+    mapping = models.ForeignKey(FrameworkControlMapping, on_delete=models.PROTECT)
+    mapping_coverage = models.CharField(max_length=20, choices=FrameworkControlMapping.Coverage.choices)
+    outcome = models.CharField(max_length=40, choices=Outcome.choices)
+    checks = models.JSONField(default=list, blank=True)
+    reasons = models.JSONField(default=list, blank=True)
+    engine_version = models.CharField(max_length=40, default="deterministic-reuse-1.0")
+    confidence = models.DecimalField(max_digits=4, decimal_places=3, default=1)
+
+
+class EvidenceQualityOverride(ImmutableTenantRecord):
+    evidence = models.ForeignKey(Evidence, on_delete=models.PROTECT, related_name="quality_overrides")
+    justification = models.TextField(max_length=4000)
+    original_score = models.DecimalField(max_digits=3, decimal_places=2)
+    configured_threshold = models.DecimalField(max_digits=3, decimal_places=2)
+    authorized_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    authorized_at = models.DateTimeField(default=timezone.now)
+
+    def clean(self):
+        super().clean()
+        if not self.justification.strip():
+            raise ValidationError({"justification": "A quality override justification is required."})
 
 
 class AssessmentResponse(TenantScopedModel):
@@ -879,6 +935,12 @@ class ComplianceGap(TenantScopedModel):
     corrective_action = models.TextField(max_length=8000)
     status = models.CharField(max_length=30, default="open")
     source_fingerprint = models.CharField(max_length=64, blank=True)
+    evidence = models.ForeignKey(Evidence, on_delete=models.PROTECT, null=True, blank=True, related_name="gaps")
+    requirement = models.ForeignKey(Requirement, on_delete=models.PROTECT, null=True, blank=True)
+    failed_check = models.CharField(max_length=80, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True)
+    due_at = models.DateTimeField(null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -1017,6 +1079,24 @@ class AuditorVerdict(ImmutableTenantRecord):
         TenantScopedModel.clean(self)
         if self.decision == self.Decision.NOT_APPLICABLE and not self.rationale.strip():
             raise ValidationError({"rationale": "Not-applicable verdicts require justification."})
+
+
+class PostClosureEvidenceChange(ImmutableTenantRecord):
+    organisation_control = models.ForeignKey(
+        OrganisationControl, on_delete=models.PROTECT, related_name="post_closure_evidence_changes"
+    )
+    evidence = models.ForeignKey(Evidence, on_delete=models.PROTECT, related_name="post_closure_changes")
+    prior_verdict = models.ForeignKey(AuditorVerdict, on_delete=models.PROTECT)
+    evaluation = models.ForeignKey(EvidenceReuseEvaluation, on_delete=models.PROTECT)
+    status = models.CharField(max_length=20, default="pending")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "organisation_control", "evidence", "prior_verdict"],
+                name="post_closure_evidence_change_uniq",
+            )
+        ]
 
 
 class RiskAcceptance(TenantScopedModel):

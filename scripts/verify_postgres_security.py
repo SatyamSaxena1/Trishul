@@ -75,6 +75,17 @@ def verify(owner_dsn, app_dsn):
             "SELECT count(*) FROM pg_trigger WHERE tgname = 'core_evidence_immutable' AND NOT tgisinternal"
         )
         assert cursor.fetchone()[0] == 1, "Evidence immutability trigger is missing"
+        cursor.execute(
+            "SELECT count(*) FROM pg_trigger "
+            "WHERE tgname = 'core_evidencereuseevaluation_immutable' AND NOT tgisinternal"
+        )
+        assert cursor.fetchone()[0] == 1, "Evidence reuse evaluation immutability trigger is missing"
+        cursor.execute(
+            "SELECT tgname FROM pg_trigger WHERE tgname IN "
+            "('core_evidencequalityoverride_immutable', 'core_postclosureevidencechange_immutable') "
+            "AND NOT tgisinternal ORDER BY tgname"
+        )
+        assert len(cursor.fetchall()) == 2, "Evidence lifecycle immutability triggers are missing"
 
 
 def verify_workflow(owner_dsn, app_dsn):
