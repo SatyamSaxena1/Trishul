@@ -1,0 +1,9 @@
+output "cluster_name" { value = aws_eks_cluster.main.name }
+output "evidence_bucket" { value = aws_s3_bucket.evidence.id }
+output "kms_key_arn" { value = aws_kms_key.data.arn }
+output "postgres_endpoint" { value = aws_db_instance.postgres.address }
+output "postgres_master_secret_arn" { value = aws_db_instance.postgres.master_user_secret[0].secret_arn }
+output "redis_endpoint" { value = aws_elasticache_serverless_cache.redis.endpoint[0].address }
+output "runtime_secret_arn" { value = aws_secretsmanager_secret.runtime.arn }
+output "waf_acl_arn" { value = aws_wafv2_web_acl.edge.arn }
+output "operations_topic_arn" { value = aws_sns_topic.operations.arn }

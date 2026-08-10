@@ -127,6 +127,10 @@ def extract(archive_path, destination):
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "normalize":
+        from deployment_assurance.normalizers.cli import main as normalize
+
+        raise SystemExit(normalize(["normalizer", *sys.argv[2:]]))
     archive_path = Path(sys.argv[1])
     output_path = Path(sys.argv[2])
     findings = []

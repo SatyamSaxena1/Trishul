@@ -1,0 +1,73 @@
+# Example consumer workflow — copy into a customer's infrastructure repository.
+#
+# Evaluates the Terraform plan for a pull request against Trishul policy and
+# fails the check when the deployment must not proceed. Make this a required
+# status check in branch protection to turn it into an actual merge gate.
+#
+# Rollout: start with `--warn-only` so teams see decisions without being
+# blocked, confirm the blocking-rule precision on real changes, then remove the
+# flag and mark the check required.
+#
+# Sensitive-data note: a Terraform plan can contain secret values even when the
+# CLI redacts its own console output. The plan is therefore generated and
+# uploaded inside a single job and is never published with
+# `actions/upload-artifact`.
+
+name: Trishul Deployment Assurance
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - "kubernetes/**"
+      - ".github/workflows/trishul-deployment-assurance.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trishul-assurance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployment-assurance:
+    name: Trishul Deployment Assurance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5e2 # v4
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_wrapper: false
+
+      - name: Generate Terraform plan
+        working-directory: terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          terraform init -input=false
+          terraform plan -input=false -lock=false -out="${RUNNER_TEMP}/tfplan"
+          terraform show -json "${RUNNER_TEMP}/tfplan" > "${RUNNER_TEMP}/tfplan.json"
+
+      - name: Evaluate against Trishul policy
+        env:
+          TRISHUL_URL: ${{ vars.TRISHUL_URL }}
+          TRISHUL_TARGET_ID: ${{ vars.TRISHUL_TARGET_ID }}
+          TRISHUL_TOKEN: ${{ secrets.TRISHUL_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python bin/trishul-gate \
+            --artifact "${RUNNER_TEMP}/tfplan.json" \
+            --source-type terraform_plan \
+            --trigger pull_request \
+            --pull-request "${{ github.event.pull_request.number }}" \
+            --idempotency-key "pr-${{ github.event.pull_request.number }}-${{ github.sha }}" \
+            --timeout-seconds 900
+
+      - name: Remove the plan from the runner
+        if: always()
+        shell: bash
+        run: rm -f "${RUNNER_TEMP}/tfplan" "${RUNNER_TEMP}/tfplan.json"
