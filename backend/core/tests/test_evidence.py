@@ -1,7 +1,9 @@
 from datetime import date, timedelta
+from unittest.mock import patch
 
 import pytest
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -61,7 +63,7 @@ def test_evidence_api_creates_an_append_only_version_chain():
     client = APIClient()
     headers = {"HTTP_AUTHORIZATION": f"Bearer {token}"}
     initial_body = {
-        **evidence_body(),
+        **evidence_body(object_key=f"{tenant.id}/evidence/policy-v1.pdf"),
         "assessment": str(assessment.id),
         "evidence_version": 99,
         "status": "superseded",
@@ -75,7 +77,7 @@ def test_evidence_api_creates_an_append_only_version_chain():
     evidence_id = created.data["id"]
     replacement = client.post(
         f"/api/v1/evidence/{evidence_id}/supersede/",
-        evidence_body(object_key="auditee/evidence/policy-v2.pdf"),
+        evidence_body(object_key=f"{tenant.id}/evidence/policy-v2.pdf"),
         format="json",
         **headers,
     )
@@ -88,7 +90,7 @@ def test_evidence_api_creates_an_append_only_version_chain():
     assert original.data["status"] == "superseded"
     assert client.post(
         f"/api/v1/evidence/{evidence_id}/supersede/",
-        evidence_body(object_key="auditee/evidence/policy-v3.pdf"),
+        evidence_body(object_key=f"{tenant.id}/evidence/policy-v3.pdf"),
         format="json",
         **headers,
     ).status_code == 400
@@ -131,3 +133,65 @@ def test_evidence_model_rejects_invalid_versions_and_reused_object_keys():
                 evidence_version=2,
                 **evidence_body(),
             )
+
+
+@patch("core.views.put_file")
+def test_evidence_upload_hashes_bytes_and_uses_a_unique_tenant_key(put_file):
+    tenant, assessment, token = evidence_setup()
+    client = APIClient()
+    uploaded = SimpleUploadedFile("policy.pdf", b"policy contents", content_type="application/pdf")
+    response = client.post(
+        "/api/v1/evidence/uploads/",
+        {
+            "assessment": str(assessment.id),
+            "title": "Access control policy",
+            "source": "manual upload",
+            "evidence_date": date.today().isoformat(),
+            "classification": "confidential",
+            "file": uploaded,
+        },
+        format="multipart",
+        HTTP_AUTHORIZATION=f"Bearer {token}",
+    )
+    assert response.status_code == 201, response.data
+    assert response.data["sha256"] == "73570d63948a49a7d55815969a64ad76fb213383ea1a0f8d1755908e38ed3da0"
+    assert response.data["object_key"].startswith(f"{tenant.id}/evidence/{assessment.id}/")
+    put_file.assert_called_once()
+    assert put_file.call_args.kwargs["content_type"] == "application/pdf"
+    replacement = client.post(
+        f"/api/v1/evidence/{response.data['id']}/supersede/",
+        {
+            "title": "Access control policy v2",
+            "source": "manual upload",
+            "evidence_date": date.today().isoformat(),
+            "classification": "confidential",
+            "file": SimpleUploadedFile("policy-v2.pdf", b"updated policy", content_type="application/pdf"),
+        },
+        format="multipart",
+        HTTP_AUTHORIZATION=f"Bearer {token}",
+    )
+    assert replacement.status_code == 201, replacement.data
+    assert replacement.data["evidence_version"] == 2
+    assert str(replacement.data["supersedes"]) == response.data["id"]
+    assert put_file.call_count == 2
+
+
+@patch("core.views.put_file", side_effect=RuntimeError("storage unavailable"))
+def test_evidence_upload_failure_does_not_create_a_record(_put_file):
+    tenant, assessment, token = evidence_setup()
+    client = APIClient()
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        client.post(
+            "/api/v1/evidence/uploads/",
+            {
+                "assessment": str(assessment.id),
+                "title": "Policy",
+                "source": "manual upload",
+                "evidence_date": date.today().isoformat(),
+                "classification": "confidential",
+                "file": SimpleUploadedFile("policy.pdf", b"contents"),
+            },
+            format="multipart",
+            HTTP_AUTHORIZATION=f"Bearer {token}",
+        )
+    assert Evidence.all_objects.filter(tenant=tenant).count() == 0
