@@ -137,6 +137,10 @@ Suspension sets `Tenant.is_active=false`, revokes service tokens, and closes act
 
 Tenant administrators configure public OIDC or SAML metadata through `/api/v1/identity-providers/`; credential values remain in the existing secret store and only `secret_reference` is accepted. Validate metadata with the configuration's `validate` action before enabling customer access. OIDC login starts at `/?tenant=<tenant-slug>` and tokens are cryptographically bound to that tenant, even when the user has memberships elsewhere. SAML metadata can be validated, but SAML ACS interoperability is not yet implemented and must not be represented as a working login. Session-policy records capture intended idle, absolute, concurrency and MFA requirements; enforcement beyond token expiry remains pending.
 
+Invitation and SCIM tokens are returned only on creation and stored as SHA-256 digests. Invitation acceptance requires an authenticated user whose email matches, and each token expires, can be revoked, and is single-use. Existing pre-migration invitations are revoked because their plaintext tokens cannot be recovered.
+
+Create a SCIM credential at `/api/v1/scim-credentials/`, retain the returned `scim.*` token, and configure the provider against `/api/v1/scim/v2/<tenant-slug>/Users`. `externalId` must carry the immutable provider subject used at login. The endpoint supports `userName eq` lookup and activation changes; deactivation changes only the selected tenant membership.
+
 Deletion is a two-person operator procedure: suspend, export if contractually required, wait the configured retention/legal-hold period, delete tenant-prefixed object versions, then delete database rows in dependency order under owner context and record an external deletion certificate. Shared backup copies age out under backup retention and cannot promise immediate physical erasure; disclose that before deletion. There is no self-service hard-delete endpoint in this release.
 
 ### Incident response and analyzer compromise

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import httpx
 import redis
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db import connection, models, transaction
 from django.db.models import Sum
 from django.http import HttpResponse
@@ -80,6 +81,8 @@ from .models import (
     RiskLink,
     RiskScore,
     Scan,
+    ScimCredential,
+    ScimIdentity,
     ServiceAccount,
     SubscriptionPlan,
     Task,
@@ -156,6 +159,7 @@ PERMISSION_PREFIX = {
     IdentityProviderConfiguration: "tenant",
     TenantSessionPolicy: "tenant",
     TenantInvitation: "membership",
+    ScimCredential: "membership",
     Engagement: "engagement",
     EngagementScope: "engagement",
     EngagementMember: "engagement",
@@ -1091,37 +1095,237 @@ class MembershipViewSet(viewset_for(Membership)):
         self._record_active_users(serializer.instance)
 
 
+TENANT_MEMBER_ROLES = {
+    Tenant.Type.AUDIT_FIRM: {
+        Membership.Role.FIRM_ADMIN,
+        Membership.Role.AUDIT_MANAGER,
+        Membership.Role.AUDITOR,
+        Membership.Role.REVIEWER,
+    },
+    Tenant.Type.AUDITEE: {
+        Membership.Role.ORG_ADMIN,
+        Membership.Role.COMPLIANCE_MANAGER,
+        Membership.Role.CONTROL_OWNER,
+        Membership.Role.RISK_OWNER,
+        Membership.Role.VENDOR_MANAGER,
+        Membership.Role.CISO,
+    },
+}
+
+
 class TenantInvitationViewSet(viewset_for(TenantInvitation)):
-    def perform_create(self, serializer):
+    def create(self, request, *args, **kwargs):
         if isinstance(self.request.user, ServicePrincipal):
             raise exceptions.PermissionDenied("A human administrator must invite users.")
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
         expires_at = serializer.validated_data["expires_at"]
         if not timezone.now() < expires_at <= timezone.now() + timedelta(days=30):
             raise exceptions.ValidationError({"expires_at": "Invitations must expire within 30 days."})
-        roles = {
-            Tenant.Type.AUDIT_FIRM: {
-                Membership.Role.FIRM_ADMIN,
-                Membership.Role.AUDIT_MANAGER,
-                Membership.Role.AUDITOR,
-                Membership.Role.REVIEWER,
-            },
-            Tenant.Type.AUDITEE: {
-                Membership.Role.ORG_ADMIN,
-                Membership.Role.COMPLIANCE_MANAGER,
-                Membership.Role.CONTROL_OWNER,
-                Membership.Role.RISK_OWNER,
-                Membership.Role.VENDOR_MANAGER,
-                Membership.Role.CISO,
-            },
-        }
-        if serializer.validated_data["role"] not in roles.get(self.request.tenant.tenant_type, set()):
+        if serializer.validated_data["role"] not in TENANT_MEMBER_ROLES.get(self.request.tenant.tenant_type, set()):
             raise exceptions.ValidationError({"role": "This role is not valid for the tenant type."})
-        invitation = serializer.save(
+        invitation, token = TenantInvitation.issue(
             tenant=self.request.tenant,
             target_tenant=self.request.tenant,
             invited_by=self.request.user,
+            **serializer.validated_data,
         )
         self._audit("membership.invited", invitation)
+        data = self.get_serializer(invitation).data
+        data["token"] = token
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def revoke(self, request, pk=None):
+        invitation = self.get_object()
+        if invitation.accepted_at:
+            raise exceptions.ValidationError({"invitation": "Accepted invitations cannot be revoked."})
+        invitation.revoked_at = timezone.now()
+        invitation.version += 1
+        invitation.save(update_fields=["revoked_at", "version", "updated_at"])
+        self._audit("membership.invitation_revoked", invitation)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ScimCredentialViewSet(viewset_for(ScimCredential)):
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if serializer.validated_data["default_role"] not in TENANT_MEMBER_ROLES.get(request.tenant.tenant_type, set()):
+            raise exceptions.ValidationError({"default_role": "This role is not valid for the tenant type."})
+        credential, token = ScimCredential.issue(tenant=request.tenant, **serializer.validated_data)
+        self._audit("scim.credential_created", credential)
+        data = self.get_serializer(credential).data
+        data["token"] = f"scim.{token}"
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def revoke(self, request, pk=None):
+        credential = self.get_object()
+        credential.revoked_at = timezone.now()
+        credential.version += 1
+        credential.save(update_fields=["revoked_at", "version", "updated_at"])
+        self._audit("scim.credential_revoked", credential)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _scim_credential(request, tenant_slug):
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer scim."):
+        raise exceptions.AuthenticationFailed("A SCIM bearer token is required.")
+    digest = hashlib.sha256(header.removeprefix("Bearer scim.").encode()).hexdigest()
+    credential = ScimCredential.all_objects.filter(
+        token_hash=digest, tenant__slug=tenant_slug, tenant__is_active=True
+    ).select_related("tenant").first()
+    if not credential or credential.revoked_at or (credential.expires_at and credential.expires_at <= timezone.now()):
+        raise exceptions.AuthenticationFailed("Invalid or expired SCIM bearer token.")
+    ScimCredential.all_objects.filter(pk=credential.pk).update(last_used_at=timezone.now())
+    return credential
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def invitation_accept(request, token):
+    if not request.user.is_authenticated or isinstance(request.user, ServicePrincipal):
+        raise exceptions.NotAuthenticated("Authenticate as the invited user before accepting.")
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    invitation = (
+        TenantInvitation.all_objects.filter(token_hash=digest)
+        .select_related("tenant", "target_tenant")
+        .first()
+    )
+    if not invitation:
+        raise exceptions.NotFound("Invitation not found.")
+    with tenant_context(invitation.tenant_id), transaction.atomic():
+        invitation = TenantInvitation.objects.select_for_update().get(pk=invitation.pk)
+        if invitation.accepted_at or invitation.revoked_at or invitation.expires_at <= timezone.now():
+            raise exceptions.ValidationError({"invitation": "Invitation is no longer valid."})
+        if request.user.email.strip().lower() != invitation.email.strip().lower():
+            raise exceptions.PermissionDenied("The authenticated email does not match the invitation.")
+        if Membership.objects.filter(user=request.user).exists():
+            raise exceptions.ValidationError({"invitation": "The user already belongs to this tenant."})
+        membership = Membership.objects.create(
+            tenant=invitation.target_tenant,
+            user=request.user,
+            role=invitation.role,
+        )
+        invitation.accepted_at = timezone.now()
+        invitation.version += 1
+        invitation.save(update_fields=["accepted_at", "version", "updated_at"])
+        AuditEvent.append(
+            tenant=invitation.tenant,
+            actor_type="user",
+            actor_id=str(request.user.id),
+            action="membership.invitation_accepted",
+            resource_type="core.membership",
+            resource_id=membership.id,
+            details={"invitation_id": str(invitation.id)},
+        )
+    return Response({"membership_id": membership.id, "tenant_id": invitation.target_tenant_id})
+
+
+def _scim_user(identity, membership=None):
+    membership = membership or Membership.objects.get(user=identity.user)
+    return {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+        "id": str(identity.id),
+        "externalId": identity.external_id,
+        "userName": identity.user.email or identity.user.username,
+        "active": membership.is_active,
+        "meta": {"resourceType": "User", "created": identity.created_at.isoformat()},
+    }
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def scim_users(request, tenant_slug):
+    credential = _scim_credential(request, tenant_slug)
+    with tenant_context(credential.tenant_id):
+        if request.method == "GET":
+            identities = ScimIdentity.objects.select_related("user").order_by("created_at")
+            filter_value = request.query_params.get("filter", "")
+            match = re.fullmatch(r'userName eq "([^"\\]+)"', filter_value) if filter_value else None
+            if filter_value and not match:
+                raise exceptions.ValidationError({"filter": "Only userName eq filters are supported."})
+            if match:
+                identities = identities.filter(user__email__iexact=match.group(1))
+            resources = [_scim_user(item) for item in identities]
+            return Response(
+                {
+                    "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
+                    "totalResults": len(resources),
+                    "Resources": resources,
+                }
+            )
+
+        username = str(request.data.get("userName", "")).strip().lower()
+        if not username or "@" not in username:
+            raise exceptions.ValidationError({"userName": "A valid email address is required."})
+        external_id = str(request.data.get("externalId", ""))[:200]
+        if not external_id:
+            raise exceptions.ValidationError({"externalId": "The immutable identity-provider subject is required."})
+        with transaction.atomic():
+            user, _ = get_user_model().objects.get_or_create(username=external_id[:150], defaults={"email": username})
+            if user.email.lower() != username:
+                user.email = username
+                user.save(update_fields=["email"])
+            identity, created = ScimIdentity.objects.get_or_create(
+                tenant=credential.tenant, user=user, defaults={"external_id": external_id}
+            )
+            if not created:
+                raise exceptions.ValidationError({"userName": "The SCIM user already exists."})
+            Membership.objects.create(
+                tenant=credential.tenant,
+                user=user,
+                role=credential.default_role,
+                is_active=bool(request.data.get("active", True)),
+            )
+            AuditEvent.append(
+                tenant=credential.tenant,
+                actor_type="service_account",
+                actor_id=str(credential.id),
+                action="scim.user_created",
+                resource_type="core.scimidentity",
+                resource_id=identity.id,
+                details={"version": identity.version},
+            )
+        return Response(_scim_user(identity), status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def scim_user_detail(request, tenant_slug, identity_id):
+    credential = _scim_credential(request, tenant_slug)
+    with tenant_context(credential.tenant_id):
+        identity = ScimIdentity.objects.select_related("user").filter(pk=identity_id).first()
+        if not identity:
+            raise exceptions.NotFound("SCIM user not found.")
+        membership = Membership.objects.get(user=identity.user)
+        if request.method == "GET":
+            return Response(_scim_user(identity))
+        active = False if request.method == "DELETE" else None
+        if request.method == "PATCH":
+            for operation in request.data.get("Operations", []):
+                if str(operation.get("op", "")).lower() != "replace" or operation.get("path") != "active":
+                    raise exceptions.ValidationError({"Operations": "Only replace active is supported."})
+                active = operation.get("value")
+                if not isinstance(active, bool):
+                    raise exceptions.ValidationError({"Operations": "active must be a boolean."})
+        membership.is_active = active
+        membership.version += 1
+        membership.save(update_fields=["is_active", "version", "updated_at"])
+        AuditEvent.append(
+            tenant=credential.tenant,
+            actor_type="service_account",
+            actor_id=str(credential.id),
+            action="scim.user_activation_changed",
+            resource_type="core.scimidentity",
+            resource_id=identity.id,
+            details={"active": active},
+        )
+        return Response(_scim_user(identity, membership))
 
 
 class EngagementViewSet(viewset_for(Engagement)):
@@ -1851,6 +2055,7 @@ MODEL_VIEWSETS = {
     "identity-providers": IdentityProviderConfigurationViewSet,
     "session-policy": viewset_for(TenantSessionPolicy),
     "tenant-invitations": TenantInvitationViewSet,
+    "scim-credentials": ScimCredentialViewSet,
     "engagements": EngagementViewSet,
     "engagement-scopes": viewset_for(EngagementScope),
     "engagement-members": EngagementMemberViewSet,
