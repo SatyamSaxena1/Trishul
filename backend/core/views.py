@@ -1496,8 +1496,31 @@ def context(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def oidc_config(request):
+    personas = []
+    if settings.TRISHUL_DEV_AUTH:
+        from .dev_auth import PERSONAS
+
+        memberships = {
+            item.user.username: item
+            for item in Membership.all_objects.filter(
+                user__username__in=[item[0] for item in PERSONAS], is_active=True, tenant__is_active=True
+            ).select_related("user", "tenant")
+        }
+        personas = [
+            {
+                "username": username,
+                "label": label,
+                "role": role,
+                "tenant_id": str(memberships[username].tenant_id),
+                "tenant_name": memberships[username].tenant.name,
+            }
+            for username, label, role, _ in PERSONAS
+            if username in memberships
+        ]
     return Response(
         {
+            "dev_auth_enabled": settings.TRISHUL_DEV_AUTH,
+            "dev_personas": personas,
             "authority": settings.OIDC_ISSUER,
             "client_id": settings.OIDC_CLIENT_ID,
             "audience": settings.OIDC_AUDIENCE,

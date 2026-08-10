@@ -1,4 +1,4 @@
-import type { User } from "oidc-client-ts";
+import type { AuthUser } from "./auth";
 
 export type Page<T> = { results: T[]; next: string | null; previous: string | null };
 export type RecordBase = { id: string; version: number; created_at: string };
@@ -14,13 +14,14 @@ export class ApiError extends Error {
 
 export class Api {
   constructor(
-    private readonly user: User,
+    private readonly user: AuthUser,
     private readonly tenantId: string,
   ) {}
 
   async request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const headers = new Headers(options.headers);
-    headers.set("Authorization", `Bearer ${this.user.access_token}`);
+    if (this.user.dev_username) headers.set("X-Trishul-Dev-User", this.user.dev_username);
+    else headers.set("Authorization", `Bearer ${this.user.access_token}`);
     headers.set("Accept", "application/json");
     if (this.tenantId) headers.set("X-Trishul-Tenant", this.tenantId);
     if (options.body && !(options.body instanceof FormData)) headers.set("Content-Type", "application/json");

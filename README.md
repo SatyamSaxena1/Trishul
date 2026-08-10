@@ -25,6 +25,8 @@ The Python language pack is intentionally marked `experimental` until representa
 
 ## Development
 
+For browser development without an OIDC provider, use the debug-only [local authentication setup](docs/local-development.md).
+
 ```text
 python -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt

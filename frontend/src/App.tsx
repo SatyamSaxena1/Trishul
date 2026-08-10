@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import type { User } from "oidc-client-ts";
 
 import { Api, ApiError, type Page, type RecordBase } from "./api";
-import { authManager, currentUser } from "./auth";
+import { authConfig, authManager, currentUser, devSignIn, signOut, type AuthUser, type DevPersona } from "./auth";
 
 type Context = {
   tenant: { id: string; name: string };
@@ -62,7 +61,9 @@ export function isTerminalState(state: string): boolean {
   return ["completed", "failed", "cancelled"].includes(state);
 }
 
-function Login({ error }: { error?: string }) {
+function Login({ error, onLogin }: { error?: string; onLogin: (user: AuthUser) => void }) {
+  const [personas, setPersonas] = useState<DevPersona[] | null>(null);
+  useEffect(() => { void authConfig().then((value) => setPersonas(value.dev_auth_enabled ? value.dev_personas : null)); }, []);
   return (
     <main className="login-shell">
       <section className="login-panel" aria-labelledby="login-title">
@@ -71,7 +72,11 @@ function Login({ error }: { error?: string }) {
         <h1 id="login-title">AI Trishul</h1>
         <p>Evidence-backed security intelligence for code, architecture, and assurance.</p>
         {error && <div className="error" role="alert">{error}</div>}
-        <button onClick={() => void authManager().then((value) => value.signinRedirect())}>Sign in with enterprise identity</button>
+        {personas ? <label>Local persona<select defaultValue="" onChange={(event) => {
+          const persona = personas.find((item) => item.username === event.target.value);
+          if (persona) onLogin(devSignIn(persona));
+        }}><option value="" disabled>Select a persona</option>{personas.map((persona) => <option key={persona.username} value={persona.username}>{persona.label} · {persona.tenant_name}</option>)}</select></label>
+          : <button onClick={() => void authManager().then((value) => value.signinRedirect())}>Sign in with enterprise identity</button>}
       </section>
     </main>
   );
@@ -260,7 +265,7 @@ function WorkflowActions({ api, path, item, onChanged }: {
   </div>;
 }
 
-function Dashboard({ user }: { user: User }) {
+function Dashboard({ user }: { user: AuthUser }) {
   const [tenantId, setTenantId] = useState(localStorage.getItem("trishul.tenant") ?? "");
   const [context, setContext] = useState<Context | null>(null);
   const [error, setError] = useState("");
@@ -348,7 +353,7 @@ function Dashboard({ user }: { user: User }) {
       <aside>
         <div className="brand"><span className="brand-mark">त्रि</span><span>AI Trishul</span></div>
         <nav aria-label="Primary"><a href="#overview">Overview</a><a href="#saas">Tenants & engagements</a><a href="#compliance">Compliance posture</a><a href="#applications">Applications</a><a href="#deployments">Deployment assurance</a><a href="#findings">Code findings</a><a href="#risks">Risk intelligence</a></nav>
-        <button className="secondary logout" onClick={() => void authManager().then((value) => value.signoutRedirect())}>Sign out</button>
+        <button className="secondary logout" onClick={() => void signOut(user)}>Sign out</button>
       </aside>
       <main>
         <header><div><p className="eyebrow">SECURITY INTELLIGENCE</p><h1 id="overview">{context?.tenant.name ?? "AI Trishul"}</h1></div><div className="identity"><span>{context?.principal.name ?? user.profile.name ?? user.profile.sub}</span><small>{context?.role ?? "authenticated"}</small></div></header>
@@ -412,10 +417,10 @@ function Dashboard({ user }: { user: User }) {
 }
 
 export default function App() {
-  const [user, setUser] = useState<User | null>();
+  const [user, setUser] = useState<AuthUser | null>();
   const [error, setError] = useState("");
   useEffect(() => { void currentUser().then(setUser).catch((reason) => { setError(reason instanceof Error ? reason.message : "Sign-in failed."); setUser(null); }); }, []);
   if (user === undefined) return <main className="loading">Loading secure workspace…</main>;
-  return user ? <Dashboard user={user} /> : <Login error={error} />;
+  return user ? <Dashboard user={user} /> : <Login error={error} onLogin={setUser} />;
 }
 

@@ -48,6 +48,9 @@ def database_config(url: str) -> dict:
 
 
 DEBUG = env_bool("DEBUG")
+TRISHUL_DEV_AUTH = env_bool("TRISHUL_DEV_AUTH")
+if TRISHUL_DEV_AUTH and not DEBUG:
+    raise RuntimeError("TRISHUL_DEV_AUTH is strictly local and requires DEBUG=true")
 SECRET_KEY = secret("DJANGO_SECRET_KEY", "unsafe-development-key" if DEBUG else "")
 if not SECRET_KEY:
     raise RuntimeError("DJANGO_SECRET_KEY or DJANGO_SECRET_KEY_FILE is required")
@@ -94,6 +97,7 @@ STATIC_URL = "/static/"
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "core.security.ServiceTokenAuthentication",
+        "core.security.DevAuthentication",
         "core.security.OIDCBearerAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],

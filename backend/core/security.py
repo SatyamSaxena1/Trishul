@@ -11,6 +11,7 @@ from django.db import connection
 from django.utils import timezone
 from rest_framework import authentication, exceptions
 
+from .dev_auth import PERSONA_USERNAMES
 from .models import Membership, ServiceAccount
 from .tenancy import set_current_tenant
 
@@ -210,6 +211,22 @@ class ServiceTokenAuthentication(authentication.BaseAuthentication):
             raise exceptions.AuthenticationFailed("Invalid or expired service token.")
         ServiceAccount.all_objects.filter(pk=account.pk).update(last_used_at=timezone.now())
         return ServicePrincipal(account), account
+
+
+class DevAuthentication(authentication.BaseAuthentication):
+    def authenticate(self, request):
+        username = request.headers.get("X-Trishul-Dev-User")
+        if not username:
+            return None
+        if not settings.TRISHUL_DEV_AUTH or username not in PERSONA_USERNAMES:
+            raise exceptions.AuthenticationFailed("Development identity is unavailable.")
+        user = get_user_model().objects.filter(username=username, is_active=True).first()
+        if not user or not Membership.all_objects.filter(user=user, is_active=True, tenant__is_active=True).exists():
+            raise exceptions.AuthenticationFailed("Development persona has not been seeded.")
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('trishul.user_id', %s, true)", [str(user.id)])
+        return user, {"dev_auth": True}
 
 
 class OIDCBearerAuthentication(authentication.BaseAuthentication):
