@@ -14,6 +14,7 @@ from core.models import (
     FrameworkVersion,
     ServiceAccount,
     Tenant,
+    TenantEntitlement,
 )
 from core.tenancy import tenant_context
 from core.tests.test_security import make_application
@@ -195,3 +196,58 @@ def test_evidence_upload_failure_does_not_create_a_record(_put_file):
             HTTP_AUTHORIZATION=f"Bearer {token}",
         )
     assert Evidence.all_objects.filter(tenant=tenant).count() == 0
+
+
+@patch("core.views.put_file")
+def test_text_evidence_extracts_typed_attributes_and_quality(put_file):
+    tenant, assessment, token = evidence_setup()
+    with tenant_context(tenant.id):
+        TenantEntitlement.objects.create(
+            tenant=tenant,
+            code="evidence_quality",
+            configuration={"threshold": 5, "version": "tenant-profile-1"},
+        )
+    content = b"""Issue Date: 2026-01-01
+Effective Date: 2026-01-02
+Review Date: 2026-07-01
+Approved By: CISO
+Signed by CISO
+Scope: Payments API, Mumbai
+Period Covered: 2026-01-01 to 2026-12-31
+Password Minimum Length: 12
+"""
+    response = APIClient().post(
+        "/api/v1/evidence/uploads/",
+        {
+            "assessment": str(assessment.id),
+            "title": "Access control policy",
+            "source": "manual upload",
+            "evidence_date": date.today().isoformat(),
+            "classification": "confidential",
+            "file": SimpleUploadedFile("policy.txt", content, content_type="text/plain"),
+        },
+        format="multipart",
+        HTTP_AUTHORIZATION=f"Bearer {token}",
+    )
+    assert response.status_code == 201, response.data
+    attributes = response.data["extracted_attributes"]
+    assert attributes["effective_date"] == "2026-01-02"
+    assert attributes["approver_name"] == "CISO"
+    assert attributes["signature_present"] is True
+    assert attributes["systems_covered"] == ["Payments API", "Mumbai"]
+    assert attributes["period_covered_to"] == "2026-12-31"
+    assert attributes["control_parameters"] == {"password_minimum_length": 12}
+    provenance = response.data["extraction_provenance"]
+    assert provenance["extractor_version"] == "native-text-1.0"
+    assert provenance["truncated"] is False
+    assert provenance["unsupported_media_type"] is False
+    assert provenance["references"]["effective_date"] == {"line": 2}
+    assert provenance["references"]["scope_statement"] == {"line": 6}
+    assert response.data["quality_score"] == "4.50"
+    assert response.data["quality_threshold"] == "5.00"
+    assert response.data["quality_passed"] is False
+    assert response.data["quality_profile_version"] == "tenant-profile-1"
+    assert response.data["quality_breakdown"]["corroboration"] == 0
+    assert AuditEvent.all_objects.filter(tenant=tenant, action="evidence.extracted").count() == 1
+    assert AuditEvent.all_objects.filter(tenant=tenant, action="evidence.quality_scored").count() == 1
+    put_file.assert_called_once()

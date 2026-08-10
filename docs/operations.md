@@ -99,6 +99,15 @@ Evidence lifecycle fields supplied by a client are ignored, existing records can
 deleted, and every uploaded replacement receives a new object key. Bucket versioning and retention
 remain defence in depth.
 
+UTF-8 `text/plain`, `text/markdown`, and `text/csv` uploads receive bounded native extraction for
+labelled dates, approval/signature indicators, scope, audit period, and supported numeric control
+parameters. Extraction provenance and the separate six-dimension evidence-quality result are stored
+on the immutable evidence version. Configure `threshold`, `version`, and optional dimension `weights`
+through the tenant entitlement code `evidence_quality`.
+
+PDF/image OCR is not implemented. Those uploads remain stored with `unsupported_media_type=true`,
+zero extraction confidence, and a failing quality result; the system does not pretend OCR occurred.
+
 ### Assessment scoring
 
 `GET /api/v1/assessments/{id}/score/` returns the live assessment score. Compliant responses score

@@ -27,6 +27,7 @@ from workflow.models import WorkflowTransition
 from .ai_gateway import GatewayPolicyError, invoke
 from .archive import UnsafeArchive, inspect_archive
 from .entitlements import EntitlementDenied, enforce, record_usage
+from .evidence_intelligence import analyse
 from .models import (
     AIAnalysisRun,
     Application,
@@ -387,13 +388,33 @@ class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
         uploaded.seek(0)
         evidence_id = uuid.uuid4()
         object_key = f"{self.request.tenant.id}/evidence/{assessment.id}/{evidence_id}/{digest.hexdigest()}"
-        put_file(object_key, uploaded, content_type=uploaded.content_type or "application/octet-stream")
+        media_type = uploaded.content_type or "application/octet-stream"
+        profile_record = TenantEntitlement.objects.filter(code="evidence_quality", enabled=True).first()
+        intelligence = analyse(
+            uploaded,
+            title=values["title"],
+            media_type=media_type,
+            evidence_date=values["evidence_date"],
+            profile=profile_record.configuration if profile_record else None,
+        )
+        put_file(object_key, uploaded, content_type=media_type)
         return Evidence.objects.create(
             id=evidence_id,
             tenant=self.request.tenant,
             assessment=assessment,
             object_key=object_key,
             sha256=digest.hexdigest(),
+            media_type=media_type,
+            extracted_attributes=intelligence["attributes"],
+            extraction_provenance=intelligence["provenance"],
+            extraction_confidence=intelligence["confidence"],
+            quality_score=intelligence["quality_score"],
+            quality_breakdown=intelligence["quality_breakdown"],
+            quality_reasons=intelligence["quality_reasons"],
+            quality_suggestions=intelligence["quality_suggestions"],
+            quality_threshold=intelligence["quality_threshold"],
+            quality_passed=intelligence["quality_passed"],
+            quality_profile_version=intelligence["quality_profile_version"],
             evidence_version=previous.evidence_version + 1 if previous else 1,
             supersedes=previous,
             **values,
@@ -406,6 +427,8 @@ class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
         with transaction.atomic():
             evidence = self._save_upload(serializer)
             self._audit("uploaded", evidence)
+            self._audit("evidence.extracted", evidence)
+            self._audit("evidence.quality_scored", evidence)
         return Response(self.get_serializer(evidence).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
@@ -429,6 +452,9 @@ class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
                     supersedes=previous,
                 )
             self._audit("superseded", current)
+            if upload:
+                self._audit("evidence.extracted", current)
+                self._audit("evidence.quality_scored", current)
         return Response(self.get_serializer(current).data, status=status.HTTP_201_CREATED)
 
 
