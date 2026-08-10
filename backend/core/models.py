@@ -278,9 +278,9 @@ class IdentityProviderConfiguration(TenantScopedModel):
 
 
 class TenantSessionPolicy(TenantScopedModel):
-    idle_timeout_minutes = models.PositiveIntegerField(default=30)
-    absolute_timeout_minutes = models.PositiveIntegerField(default=720)
-    max_concurrent_sessions = models.PositiveSmallIntegerField(default=5)
+    idle_timeout_minutes = models.PositiveIntegerField(default=30, validators=[MinValueValidator(1)])
+    absolute_timeout_minutes = models.PositiveIntegerField(default=720, validators=[MinValueValidator(1)])
+    max_concurrent_sessions = models.PositiveSmallIntegerField(default=5, validators=[MinValueValidator(1)])
     require_mfa = models.BooleanField(default=True)
 
     class Meta:
@@ -290,6 +290,18 @@ class TenantSessionPolicy(TenantScopedModel):
         super().clean()
         if self.idle_timeout_minutes > self.absolute_timeout_minutes:
             raise ValidationError({"idle_timeout_minutes": "Idle timeout cannot exceed the absolute timeout."})
+
+
+class AuthSession(TenantScopedModel):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    started_at = models.DateTimeField(default=timezone.now)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    absolute_expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["tenant", "user", "revoked_at"], name="auth_session_active_idx")]
 
 
 class TenantInvitation(TenantScopedModel):

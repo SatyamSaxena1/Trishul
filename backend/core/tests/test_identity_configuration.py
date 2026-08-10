@@ -1,12 +1,15 @@
+from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import override_settings
+from django.utils import timezone
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework.test import APIClient
 
-from core.models import IdentityProviderConfiguration, Membership, Tenant, TenantSessionPolicy
+from core.models import AuthSession, IdentityProviderConfiguration, Membership, Tenant, TenantSessionPolicy
 from core.security import OIDCBearerAuthentication
 from core.tenancy import tenant_context
 
@@ -110,7 +113,7 @@ def test_tenant_oidc_token_cannot_select_another_membership(jwks_client, decode)
     )
 
     assert response.status_code == 403
-    assert any("does not authorize" in str(value) for value in response.data.values()), response.data
+    assert "OIDC is not configured" in str(response.data), response.data
 
 
 def test_identity_and_session_configuration_fail_closed():
@@ -125,3 +128,59 @@ def test_identity_and_session_configuration_fail_closed():
             issuer="http://identity.example.test",
             jwks_url="http://identity.example.test/keys",
         )
+
+
+def test_session_policy_revokes_the_oldest_concurrent_token():
+    tenant = Tenant.objects.create(slug="session-limit", name="Session limit")
+    user = _member(tenant, "session-user")
+    configuration = _oidc(tenant)
+    with tenant_context(tenant.id):
+        TenantSessionPolicy.objects.create(tenant=tenant, max_concurrent_sessions=1)
+        first = OIDCBearerAuthentication._enforce_session(
+            configuration, user, "first-token", {"exp": 2_000_000_000}
+        )
+        second = OIDCBearerAuthentication._enforce_session(
+            configuration, user, "second-token", {"exp": 2_000_000_000}
+        )
+    first.refresh_from_db()
+    assert first.revoked_at is not None
+    assert second.revoked_at is None
+
+
+def test_idle_session_is_rejected():
+    tenant = Tenant.objects.create(slug="session-idle", name="Session idle")
+    user = _member(tenant, "idle-user")
+    configuration = _oidc(tenant)
+    with tenant_context(tenant.id):
+        TenantSessionPolicy.objects.create(tenant=tenant, idle_timeout_minutes=1)
+        session = OIDCBearerAuthentication._enforce_session(
+            configuration, user, "idle-token", {"exp": 2_000_000_000}
+        )
+        AuthSession.objects.filter(pk=session.pk).update(last_seen_at=timezone.now() - timedelta(minutes=2))
+        with pytest.raises(AuthenticationFailed, match="expired or been revoked"):
+            OIDCBearerAuthentication._enforce_session(
+                configuration, user, "idle-token", {"exp": 2_000_000_000}
+            )
+
+
+def test_user_can_list_and_revoke_only_their_own_sessions():
+    tenant = Tenant.objects.create(slug="session-api", name="Session API")
+    user = _member(tenant, "session-api-user")
+    other = _member(tenant, "session-api-other")
+    configuration = _oidc(tenant)
+    with tenant_context(tenant.id):
+        own = OIDCBearerAuthentication._enforce_session(
+            configuration, user, "own-token", {"exp": 2_000_000_000}
+        )
+        OIDCBearerAuthentication._enforce_session(
+            configuration, other, "other-token", {"exp": 2_000_000_000}
+        )
+    client = APIClient()
+    client.force_authenticate(user)
+    response = client.get("/api/v1/sessions/", HTTP_X_TRISHUL_TENANT=str(tenant.id))
+    assert response.status_code == 200
+    assert [item["id"] for item in response.data["results"]] == [str(own.id)]
+    revoked = client.post(f"/api/v1/sessions/{own.id}/revoke/", HTTP_X_TRISHUL_TENANT=str(tenant.id))
+    assert revoked.status_code == 204
+    own.refresh_from_db()
+    assert own.revoked_at is not None
