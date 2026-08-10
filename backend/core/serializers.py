@@ -21,7 +21,9 @@ from .models import (
     EngagementScope,
     EngagementStatusHistory,
     Evidence,
+    EvidenceQualityOverride,
     EvidenceRequirement,
+    EvidenceReuseEvaluation,
     Finding,
     FindingEvidence,
     Framework,
@@ -32,6 +34,7 @@ from .models import (
     ModelConfiguration,
     OrganisationControl,
     Organization,
+    PostClosureEvidenceChange,
     PromptVersion,
     Remediation,
     Report,
@@ -139,6 +142,8 @@ ControlEvidenceLinkSerializer = serializer_for(
     ControlEvidenceLink, read_only_fields=tuple(field.name for field in ControlEvidenceLink._meta.fields)
 )
 AssessmentSerializer = serializer_for(Assessment)
+
+
 class EvidenceSerializer(TenantModelSerializer):
     status = serializers.SerializerMethodField()
 
@@ -165,6 +170,7 @@ class EvidenceSerializer(TenantModelSerializer):
             "quality_threshold",
             "quality_passed",
             "quality_profile_version",
+            "submitted_by",
         )
 
     def get_status(self, obj):
@@ -201,6 +207,15 @@ class EvidenceReplacementUploadSerializer(EvidenceUploadSerializer):
 
 
 ComplianceGapSerializer = serializer_for(ComplianceGap)
+EvidenceReuseEvaluationSerializer = serializer_for(
+    EvidenceReuseEvaluation, read_only_fields=tuple(field.name for field in EvidenceReuseEvaluation._meta.fields)
+)
+EvidenceQualityOverrideSerializer = serializer_for(
+    EvidenceQualityOverride, read_only_fields=tuple(field.name for field in EvidenceQualityOverride._meta.fields)
+)
+PostClosureEvidenceChangeSerializer = serializer_for(
+    PostClosureEvidenceChange, read_only_fields=tuple(field.name for field in PostClosureEvidenceChange._meta.fields)
+)
 AssessmentEvidenceSerializer = serializer_for(AssessmentEvidence)
 RiskSerializer = serializer_for(Risk)
 RiskLinkSerializer = serializer_for(RiskLink)
@@ -360,6 +375,9 @@ SERIALIZERS = {
     AssessmentResponse: AssessmentResponseSerializer,
     AssessmentEvidence: AssessmentEvidenceSerializer,
     Evidence: EvidenceSerializer,
+    EvidenceReuseEvaluation: EvidenceReuseEvaluationSerializer,
+    EvidenceQualityOverride: EvidenceQualityOverrideSerializer,
+    PostClosureEvidenceChange: PostClosureEvidenceChangeSerializer,
     ComplianceGap: ComplianceGapSerializer,
     Risk: RiskSerializer,
     RiskLink: RiskLinkSerializer,

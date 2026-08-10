@@ -26,6 +26,14 @@ type DeploymentDecision = RecordBase & {
 };
 type TenantSummary = RecordBase & { name: string; slug: string; tenant_type: string; isolation_tier: string };
 type Engagement = RecordBase & { name: string; reference: string; status: string; starts_on: string; ends_on: string };
+type AuditorReview = {
+  organisation_control: OrganisationControl;
+  requirements: { control_id: string; criticality: string; testing_guidance: string }[];
+  system_evidence_verdicts: { id: string; outcome: string; checks: { check: string; status: string; reason: string }[] }[];
+  human_auditor_verdict: { decision: string; rationale: string } | null;
+  locked: boolean;
+  pending_post_closure_changes: RecordBase[];
+};
 type OrganisationControl = RecordBase & { unified_control: string; status: string; implementation_score: string };
 type ComplianceGap = RecordBase & { title: string; severity: number; status: string };
 type Task = RecordBase & { title: string; status: string; due_at: string | null };
@@ -279,6 +287,7 @@ function Dashboard({ user }: { user: AuthUser }) {
   const [decisions, setDecisions] = useState<Page<DeploymentDecision>>(EMPTY_PAGE);
   const [firms, setFirms] = useState<TenantSummary[]>([]);
   const [engagements, setEngagements] = useState<Page<Engagement>>(EMPTY_PAGE);
+  const [auditorReviews, setAuditorReviews] = useState<AuditorReview[]>([]);
   const [controls, setControls] = useState<Page<OrganisationControl>>(EMPTY_PAGE);
   const [gaps, setGaps] = useState<Page<ComplianceGap>>(EMPTY_PAGE);
   const [tasks, setTasks] = useState<Page<Task>>(EMPTY_PAGE);
@@ -331,6 +340,10 @@ function Dashboard({ user }: { user: AuthUser }) {
         setFirms(firmRows); setEngagements(engagementPage); setControls(controlPage); setGaps(gapPage); setTasks(taskPage);
         setEvidence(evidencePage); setEntitlements(entitlementPage); setUsage(usagePage); setRuns(runPage);
         setControlResults(resultPage); setArtifacts(artifactPage); setWaivers(waiverPage);
+        const reviews = await Promise.all(engagementPage.results.filter((item) => item.status === "active").map(
+          (item) => api.request<AuditorReview[]>(`engagements/${item.id}/control-reviews/`).catch(() => [])
+        ));
+        if (active) setAuditorReviews(reviews.flat());
         if (!tenantId) { setTenantId(nextContext.tenant.id); localStorage.setItem("trishul.tenant", nextContext.tenant.id); }
       } catch (reason) {
         if (active) setError(reason instanceof ApiError ? reason.message : "Unable to load security intelligence.");
@@ -371,6 +384,7 @@ function Dashboard({ user }: { user: AuthUser }) {
           <div className="two-column"><SaaSAction api={api} role={context?.role ?? null} onCreated={() => setRefresh((value) => value + 1)} /><EngagementWizard api={api} role={context?.role ?? null} onCreated={() => setRefresh((value) => value + 1)} /></div>
           {!!firms.length && <table><thead><tr><th>Audit firm</th><th>Isolation</th></tr></thead><tbody>{firms.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.slug}</small></td><td>{decisionLabel(item.isolation_tier)}</td></tr>)}</tbody></table>}
           {!!engagements.results.length && <table><thead><tr><th>Engagement</th><th>Window</th><th>Status</th><th>Workflow</th></tr></thead><tbody>{engagements.results.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.reference}</small></td><td>{item.starts_on} – {item.ends_on}</td><td>{item.status}</td><td><WorkflowActions api={api} path="engagements" item={item} onChanged={() => setRefresh((value) => value + 1)} /></td></tr>)}</tbody></table>}
+          {!!auditorReviews.length && <div><h3>Auditor control review</h3>{auditorReviews.map((review) => <article className="item" key={review.organisation_control.id}><div><strong>{review.requirements.map((item) => item.control_id).join(", ") || review.organisation_control.unified_control}</strong><small>System evidence verdict: {review.system_evidence_verdicts.at(-1)?.outcome ?? "not evaluated"} · Human auditor verdict: {review.human_auditor_verdict?.decision ?? "not recorded"} · {review.locked ? "locked" : "open"}{review.pending_post_closure_changes.length ? " · evidence changed after closure" : ""}</small></div></article>)}</div>}
           {!firms.length && !engagements.results.length && <p className="empty">No tenant administration or assigned audit work is available for this role.</p>}
           {!!entitlements.results.length && <p className="quiet">Entitlements: {entitlements.results.map((item) => `${item.code}=${item.enabled ? item.limit ?? "enabled" : "disabled"}`).join(" · ")}</p>}
           {!!usage.results.length && <p className="quiet">Latest usage: {usage.results.slice(0, 6).map((item) => `${item.metric} ${item.quantity}`).join(" · ")}</p>}

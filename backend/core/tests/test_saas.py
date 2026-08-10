@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -8,11 +8,15 @@ from rest_framework.test import APIClient
 
 from core.models import (
     Application,
+    Assessment,
     AuditorVerdict,
+    ControlEvidenceLink,
     CrossTenantAccessEvent,
     Engagement,
     EngagementMember,
+    Evidence,
     FrameworkControlMapping,
+    FrameworkVersion,
     Membership,
     OrganisationControl,
     Organization,
@@ -241,6 +245,7 @@ def test_auditor_verdict_lock_requires_reasoned_manager_unlock():
     application = make_application(auditee)
     auditor = member(firm, Membership.Role.AUDITOR, "auditor")
     manager = member(firm, Membership.Role.AUDIT_MANAGER, "manager")
+    compliance_manager = member(auditee, Membership.Role.COMPLIANCE_MANAGER, "compliance-manager")
     engagement = engagement_for(firm, auditee, manager, application=application)
     with tenant_context(firm.id):
         EngagementMember.objects.create(
@@ -263,6 +268,21 @@ def test_auditor_verdict_lock_requires_reasoned_manager_unlock():
     body = {"organisation_control_id": str(control.id), "decision": "compliant", "rationale": "Evidence reviewed."}
     assert client.post(url, body, format="json").status_code == 201
     assert client.post(url, body, format="json").status_code == 400
+    review = client.get(f"/api/v1/engagements/{engagement.id}/control-reviews/")
+    assert review.status_code == 200, review.data
+    assert review.data[0]["locked"] is True
+    assert "system_evidence_verdicts" in review.data[0]
+    assert "human_auditor_verdict" in review.data[0]
+
+    client.force_authenticate(compliance_manager)
+    current = client.get(f"/api/v1/organisation-controls/{control.id}/")
+    assert current.status_code == 200, current.data
+    assert client.patch(
+        f"/api/v1/organisation-controls/{control.id}/",
+        {"applicability": "not_applicable"},
+        format="json",
+        HTTP_IF_MATCH=str(current.data["version"]),
+    ).status_code == 403
 
     client.force_authenticate(manager)
     unlock = client.post(
@@ -276,6 +296,74 @@ def test_auditor_verdict_lock_requires_reasoned_manager_unlock():
     with tenant_context(auditee.id):
         verdicts = list(AuditorVerdict.objects.filter(organisation_control=control).order_by("finalized_at"))
     assert [item.locked for item in verdicts] == [True, False, True]
+
+
+def test_evidence_uploader_cannot_record_same_control_verdict():
+    firm = Tenant.objects.create(slug="sod-firm", name="Firm", tenant_type=Tenant.Type.AUDIT_FIRM)
+    auditee = Tenant.objects.create(slug="sod-auditee", name="Auditee", tenant_type=Tenant.Type.AUDITEE)
+    application = make_application(auditee)
+    uploader = member(firm, Membership.Role.AUDITOR, "uploader-auditor")
+    independent = member(firm, Membership.Role.AUDITOR, "independent-auditor")
+    manager = member(firm, Membership.Role.AUDIT_MANAGER, "sod-manager")
+    engagement = engagement_for(firm, auditee, manager, application=application)
+    with tenant_context(firm.id):
+        for user in (uploader, independent):
+            EngagementMember.objects.create(
+                tenant=firm, engagement=engagement, user=user, role=EngagementMember.Role.AUDITOR
+            )
+    with tenant_context(auditee.id):
+        framework = FrameworkVersion.objects.create(
+            tenant=auditee,
+            framework="Demo",
+            version_name="1",
+            source_url="https://example.test/demo",
+            catalog_hash="a" * 64,
+        )
+        assessment = Assessment.objects.create(
+            tenant=auditee, application=application, framework_version=framework, name="Demo"
+        )
+        uco = UnifiedControlObjective.objects.create(
+            tenant=auditee,
+            code="UCO-SOD-1",
+            domain="access",
+            objective="Independent evidence review.",
+            control_type="preventive",
+            nature="process",
+        )
+        control = OrganisationControl.objects.create(tenant=auditee, application=application, unified_control=uco)
+        evidence = Evidence.objects.create(
+            tenant=auditee,
+            assessment=assessment,
+            title="Submitted policy",
+            source="manual",
+            evidence_date=date.today(),
+            object_key=f"{auditee.id}/evidence/sod.txt",
+            sha256="9" * 64,
+            classification="internal",
+            submitted_by=uploader,
+        )
+        ControlEvidenceLink.objects.create(
+            tenant=auditee,
+            organisation_control=control,
+            evidence=evidence,
+            source_type="manual",
+            source_id=evidence.id,
+            source_hash=evidence.sha256,
+            verdict="accept",
+            reason="Manual test link.",
+            mapping_version="1",
+        )
+
+    url = f"/api/v1/engagements/{engagement.id}/verdicts/"
+    body = {"organisation_control_id": str(control.id), "decision": "compliant", "rationale": "Reviewed."}
+    client = APIClient()
+    client.force_authenticate(uploader)
+    assert client.post(url, body, format="json").status_code == 403
+    assert CrossTenantAccessEvent.all_objects.filter(
+        tenant=firm, subject_id=str(uploader.id), reason="evidence_submitter_separation_of_duties"
+    ).exists()
+    client.force_authenticate(independent)
+    assert client.post(url, body, format="json").status_code == 201
 
 
 def test_partial_and_ai_control_mappings_fail_closed():
