@@ -28,6 +28,6 @@ terraform plan -var-file=recovery.tfvars -out recovery.tfplan
 terraform apply recovery.tfplan
 ```
 
-Use a separate checkout or Terraform data directory so primary backend metadata is never reused. The recovery example is configured as a disposable drill; remove `recovery_drill=true` and enable database deletion protection for an incident. DNS cutover and failback remain manual. The one-hour RPO/four-hour RTO are targets until the quarterly procedure in [operations](../../docs/operations.md#disaster-recovery) completes within those bounds.
+Use a separate checkout or Terraform data directory so primary backend metadata is never reused. The recovery example is configured as a disposable drill; remove `recovery_drill=true` and enable database deletion protection for an incident. DNS cutover and failback remain manual. The 15-minute RPO/four-hour RTO are targets until the quarterly procedure in [operations](../../docs/operations.md#disaster-recovery) completes within those bounds.
 
 The shared tier is implemented here. Separate database/bucket/KMS resources for enterprise-isolated tenants and full dedicated-instance automation remain follow-up work. CloudFront, SES identity verification, Route 53, and ACM remain account/domain-dependent integration steps.

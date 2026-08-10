@@ -52,8 +52,8 @@ run "private_cluster_and_workload_identity" {
   }
 
   assert {
-    condition     = aws_db_instance_automated_backups_replication.postgres[0].retention_period == 14 && aws_cloudwatch_metric_alarm.rds_recovery_point_age[0].threshold == 3600
-    error_message = "RDS replication must keep 14 days and alarm beyond the one-hour RPO target."
+    condition     = aws_db_instance_automated_backups_replication.postgres[0].retention_period == 14 && aws_cloudwatch_metric_alarm.rds_recovery_point_age[0].threshold == 900
+    error_message = "RDS replication must keep 14 days and alarm beyond the 15-minute RPO target."
   }
 }
 
