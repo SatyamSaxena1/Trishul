@@ -45,6 +45,7 @@ from .models import (
     AssessmentResponse,
     AuditEvent,
     AuditorVerdict,
+    AuthSession,
     ComplianceGap,
     ControlAssignment,
     ControlEvidenceLink,
@@ -158,6 +159,7 @@ PERMISSION_PREFIX = {
     TenantBranding: "branding",
     IdentityProviderConfiguration: "tenant",
     TenantSessionPolicy: "tenant",
+    AuthSession: "membership",
     TenantInvitation: "membership",
     ScimCredential: "membership",
     Engagement: "engagement",
@@ -452,6 +454,30 @@ class IdentityProviderConfigurationViewSet(viewset_for(IdentityProviderConfigura
         configuration.save(update_fields=["validated_at", "version", "updated_at"])
         self._audit("identity_provider.validated", configuration)
         return Response(self.get_serializer(configuration).data)
+
+
+class AuthSessionViewSet(TenantModelViewSet):
+    model = AuthSession
+    serializer_class = SERIALIZERS[AuthSession]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def check_permissions(self, request):
+        viewsets.ModelViewSet.check_permissions(self, request)
+        if isinstance(request.user, ServicePrincipal):
+            raise exceptions.PermissionDenied("Service accounts do not have browser sessions.")
+
+    def get_queryset(self):
+        return super().get_queryset().filter(user=self.request.user)
+
+    @action(detail=True, methods=["post"])
+    def revoke(self, request, pk=None):
+        session = self.get_object()
+        if session.revoked_at is None:
+            session.revoked_at = timezone.now()
+            session.version += 1
+            session.save(update_fields=["revoked_at", "version", "updated_at"])
+            self._audit("session.revoked", session)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ServiceAccountViewSet(viewset_for(ServiceAccount)):
@@ -2054,6 +2080,7 @@ MODEL_VIEWSETS = {
     "tenant-branding": viewset_for(TenantBranding),
     "identity-providers": IdentityProviderConfigurationViewSet,
     "session-policy": viewset_for(TenantSessionPolicy),
+    "sessions": AuthSessionViewSet,
     "tenant-invitations": TenantInvitationViewSet,
     "scim-credentials": ScimCredentialViewSet,
     "engagements": EngagementViewSet,

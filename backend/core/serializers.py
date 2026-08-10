@@ -12,6 +12,7 @@ from .models import (
     AssessmentResponse,
     AuditEvent,
     AuditorVerdict,
+    AuthSession,
     ComplianceGap,
     ControlAssignment,
     ControlEvidenceLink,
@@ -118,6 +119,9 @@ TenantBrandingSerializer = serializer_for(TenantBranding)
 IdentityProviderConfigurationSerializer = serializer_for(IdentityProviderConfiguration)
 IdentityProviderConfigurationSerializer.Meta.extra_kwargs = {"secret_reference": {"write_only": True}}
 TenantSessionPolicySerializer = serializer_for(TenantSessionPolicy)
+AuthSessionSerializer = serializer_for(
+    AuthSession, read_only_fields=tuple(field.name for field in AuthSession._meta.fields)
+)
 TenantInvitationSerializer = serializer_for(
     TenantInvitation,
     read_only_fields=("target_tenant", "invited_by", "accepted_at", "revoked_at", "token_hash"),
@@ -361,6 +365,7 @@ SERIALIZERS = {
     TenantBranding: TenantBrandingSerializer,
     IdentityProviderConfiguration: IdentityProviderConfigurationSerializer,
     TenantSessionPolicy: TenantSessionPolicySerializer,
+    AuthSession: AuthSessionSerializer,
     TenantInvitation: TenantInvitationSerializer,
     ScimCredential: ScimCredentialSerializer,
     ScimIdentity: ScimIdentitySerializer,

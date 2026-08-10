@@ -135,7 +135,9 @@ Suspension sets `Tenant.is_active=false`, revokes service tokens, and closes act
 
 ### Tenant identity configuration
 
-Tenant administrators configure public OIDC or SAML metadata through `/api/v1/identity-providers/`; credential values remain in the existing secret store and only `secret_reference` is accepted. Validate metadata with the configuration's `validate` action before enabling customer access. OIDC login starts at `/?tenant=<tenant-slug>` and tokens are cryptographically bound to that tenant, even when the user has memberships elsewhere. SAML metadata can be validated, but SAML ACS interoperability is not yet implemented and must not be represented as a working login. Session-policy records capture intended idle, absolute, concurrency and MFA requirements; enforcement beyond token expiry remains pending.
+Tenant administrators configure public OIDC or SAML metadata through `/api/v1/identity-providers/`; credential values remain in the existing secret store and only `secret_reference` is accepted. Validate metadata with the configuration's `validate` action before enabling customer access. OIDC login starts at `/?tenant=<tenant-slug>` and every API request must send `X-Trishul-Tenant`; the token and provider configuration are bound to that tenant before RLS-protected identity data is read. SAML metadata can be validated, but SAML ACS interoperability is not yet implemented and must not be represented as a working login.
+
+Tenant session policy enforces MFA, idle timeout, absolute timeout and concurrent browser-session limits for tenant-configured OIDC. When the concurrency limit is reached the oldest session is revoked and audited. Users can list and revoke only their own sessions through `/api/v1/sessions/`. Global legacy OIDC remains governed by token expiry until it is migrated to tenant configuration.
 
 Invitation and SCIM tokens are returned only on creation and stored as SHA-256 digests. Invitation acceptance requires an authenticated user whose email matches, and each token expires, can be revoked, and is single-use. Existing pre-migration invitations are revoked because their plaintext tokens cannot be recovered.
 

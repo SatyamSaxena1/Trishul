@@ -2,17 +2,25 @@ import hashlib
 import hmac
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import jwt
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.db import connection
+from django.db import connection, transaction
 from django.utils import timezone
 from rest_framework import authentication, exceptions
 
 from .dev_auth import PERSONA_USERNAMES
-from .models import IdentityProviderConfiguration, Membership, ServiceAccount
+from .models import (
+    AuditEvent,
+    AuthSession,
+    IdentityProviderConfiguration,
+    Membership,
+    ServiceAccount,
+    TenantSessionPolicy,
+)
 from .tenancy import set_current_tenant
 
 logger = logging.getLogger(__name__)
@@ -233,8 +241,17 @@ class OIDCBearerAuthentication(authentication.BaseAuthentication):
     _jwks_clients = {}
 
     @classmethod
-    def _configuration(cls, token):
+    def _configuration(cls, token, request):
         unverified = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
+        requested_tenant = request.headers.get("X-Trishul-Tenant")
+        if requested_tenant:
+            try:
+                requested_tenant = UUID(requested_tenant)
+            except ValueError as exc:
+                raise exceptions.AuthenticationFailed("Invalid tenant selector.") from exc
+            if connection.vendor == "postgresql":
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('trishul.tenant_id', %s, true)", [str(requested_tenant)])
         audiences = unverified.get("aud", [])
         audiences = {audiences} if isinstance(audiences, str) else set(audiences)
         configured = list(
@@ -243,6 +260,7 @@ class OIDCBearerAuthentication(authentication.BaseAuthentication):
                 enabled=True,
                 issuer=unverified.get("iss", ""),
                 tenant__is_active=True,
+                **({"tenant_id": requested_tenant} if requested_tenant else {}),
             ).select_related("tenant")
         )
         matches = [item for item in configured if item.audience in audiences]
@@ -250,13 +268,64 @@ class OIDCBearerAuthentication(authentication.BaseAuthentication):
             raise exceptions.AuthenticationFailed("Identity configuration is ambiguous.")
         return matches[0] if matches else None
 
+    @staticmethod
+    def _enforce_session(configuration, user, token, claims):
+        now = timezone.now()
+        policy = TenantSessionPolicy.objects.filter(tenant=configuration.tenant).first()
+        if policy is None:
+            policy = TenantSessionPolicy(tenant=configuration.tenant)
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        idle_cutoff = now - timedelta(minutes=policy.idle_timeout_minutes)
+        with transaction.atomic():
+            session = AuthSession.objects.select_for_update().filter(token_hash=digest).first()
+            if session:
+                if session.revoked_at or session.absolute_expires_at <= now or session.last_seen_at <= idle_cutoff:
+                    raise exceptions.AuthenticationFailed("Session has expired or been revoked.")
+                AuthSession.objects.filter(pk=session.pk).update(last_seen_at=now)
+                return session
+            active = list(
+                AuthSession.objects.select_for_update()
+                .filter(user=user, revoked_at__isnull=True)
+                .order_by("started_at")
+            )
+            active = [item for item in active if item.absolute_expires_at > now and item.last_seen_at > idle_cutoff]
+            for oldest in active[: max(0, len(active) - policy.max_concurrent_sessions + 1)]:
+                oldest.revoked_at = now
+                oldest.save(update_fields=["revoked_at", "updated_at"])
+                AuditEvent.append(
+                    tenant=configuration.tenant,
+                    actor_type="system",
+                    actor_id="session-policy",
+                    action="session.concurrent_limit_revoked",
+                    resource_type="core.authsession",
+                    resource_id=oldest.id,
+                    details={"reason": "max_concurrent_sessions"},
+                )
+            token_expiry = datetime.fromtimestamp(claims["exp"], tz=UTC)
+            session = AuthSession.objects.create(
+                tenant=configuration.tenant,
+                user=user,
+                token_hash=digest,
+                absolute_expires_at=min(token_expiry, now + timedelta(minutes=policy.absolute_timeout_minutes)),
+            )
+            AuditEvent.append(
+                tenant=configuration.tenant,
+                actor_type="user",
+                actor_id=str(user.id),
+                action="session.started",
+                resource_type="core.authsession",
+                resource_id=session.id,
+                details={"absolute_expires_at": session.absolute_expires_at.isoformat()},
+            )
+            return session
+
     def authenticate(self, request):
         header = authentication.get_authorization_header(request).decode()
         if not header.startswith("Bearer ") or header.startswith("Bearer trishul."):
             return None
         token = header.split(" ", 1)[1]
         try:
-            configuration = self._configuration(token)
+            configuration = self._configuration(token, request)
             issuer = configuration.issuer if configuration else settings.OIDC_ISSUER
             audience = configuration.audience if configuration else settings.OIDC_AUDIENCE
             jwks_url = configuration.jwks_url if configuration else settings.OIDC_JWKS_URL
@@ -278,7 +347,18 @@ class OIDCBearerAuthentication(authentication.BaseAuthentication):
         except jwt.PyJWTError as exc:
             logger.warning("OIDC token validation failed: %s", type(exc).__name__)
             raise exceptions.AuthenticationFailed("Invalid identity token.") from exc
-        mfa_required = configuration.mfa_required if configuration else settings.OIDC_MFA_REQUIRED
+        policy_requires_mfa = (
+            TenantSessionPolicy.objects.filter(tenant=configuration.tenant)
+            .values_list("require_mfa", flat=True)
+            .first()
+            if configuration
+            else False
+        )
+        mfa_required = (
+            configuration.mfa_required or policy_requires_mfa
+            if configuration
+            else settings.OIDC_MFA_REQUIRED
+        )
         allowed_acr = set(configuration.allowed_acr_values) if configuration else settings.OIDC_MFA_ACR_VALUES
         if mfa_required:
             amr = set(claims.get("amr", []))
@@ -295,6 +375,7 @@ class OIDCBearerAuthentication(authentication.BaseAuthentication):
                 cursor.execute("SELECT set_config('trishul.user_id', %s, true)", [str(user.id)])
         if configuration:
             claims["trishul_tenant_id"] = str(configuration.tenant_id)
+            self._enforce_session(configuration, user, token, claims)
         return user, claims
 
 
