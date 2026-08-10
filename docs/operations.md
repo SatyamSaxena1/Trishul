@@ -91,7 +91,7 @@ The shared tier uses one database and bucket with forced RLS and tenant-prefixed
 
 ### Disaster recovery
 
-The primary Terraform mode continuously sends evidence to a KMS-encrypted destination bucket with S3 RTC, replicates RDS automated backups and transaction logs, and replicates the runtime Secrets Manager secret. A destination-region readiness build measures the real RDS recovery-point age every 15 minutes. These implement a one-hour RPO target; they do not prove it until a timed drill passes.
+The primary Terraform mode continuously sends evidence to a KMS-encrypted destination bucket with S3 RTC, replicates RDS automated backups and transaction logs, and replicates the runtime Secrets Manager secret. A destination-region readiness build measures the real RDS recovery-point age every 15 minutes and alarms when it exceeds 15 minutes. These implement a 15-minute RPO target; they do not prove it until a timed drill passes.
 
 For a quarterly sandbox drill, record the start time, copy `recovery.backend.hcl.example` and `recovery.tfvars.example`, fill their non-secret identifiers from the primary Terraform outputs, and initialize a separate Terraform data directory and backend key. Apply `deployment_mode=recovery`; it reuses the replica bucket, restores RDS to the latest replicated point, and creates regional EKS, Valkey, and CodeBuild only for the drill. Sync the replicated runtime secret through External Secrets, configure the protected GitHub environment with the recovery CodeBuild outputs and `TRISHUL_AWS_REGION=<dr_region>`, and deploy the exact tested commit.
 
@@ -130,7 +130,7 @@ For rollback, stop new traffic and workers, retain all data, and redeploy the pr
 ## Known gaps by severity
 
 - **Critical:** none known after the implemented isolation and integrity checks; production onboarding still requires an independent security review.
-- **High:** enterprise/dedicated tenant provisioning is not automated, and the one-hour RPO/four-hour RTO remain targets until a timed recovery drill succeeds.
+- **High:** enterprise/dedicated tenant provisioning is not automated, and the 15-minute RPO/four-hour RTO remain targets until a timed recovery drill succeeds.
 - **Medium:** no live cloud drift connectors, GitHub App/Check Run, presigned large-artifact upload, OSCAL Catalogue/Profile import, complete SSP/POA&M generation, or approval-gated remediation execution; SaaS domain metrics are currently derived rather than native counters.
 - **Low:** CloudFront, Route 53, SES/ACM setup, tenant tier migration, and deletion orchestration are documented operator procedures rather than one-command workflows.
 

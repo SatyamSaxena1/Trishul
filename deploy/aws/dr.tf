@@ -343,14 +343,14 @@ resource "aws_cloudwatch_metric_alarm" "rds_recovery_point_age" {
   provider            = aws.dr
   count               = local.is_primary ? 1 : 0
   alarm_name          = "${local.name}-rds-recovery-point-age"
-  alarm_description   = "Latest replicated RDS recovery point is more than one hour old."
+  alarm_description   = "Latest replicated RDS recovery point is more than 15 minutes old."
   namespace           = "Trishul/DR"
   metric_name         = "RDSBackupRecoveryPointAgeSeconds"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   period              = 900
   statistic           = "Maximum"
-  threshold           = 3600
+  threshold           = 900
   treat_missing_data  = "breaching"
   alarm_actions       = [aws_sns_topic.dr_operations[0].arn]
   ok_actions          = [aws_sns_topic.dr_operations[0].arn]
