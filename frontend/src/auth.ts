@@ -15,6 +15,7 @@ export type PublicConfig = {
   client_id: string;
   redirect_uri: string;
   scope: string;
+  protocol: "oidc" | "saml";
 };
 
 export type AuthUser = {
@@ -28,7 +29,8 @@ let config: PublicConfig | undefined;
 
 export async function authConfig(): Promise<PublicConfig> {
   if (config) return config;
-  const response = await fetch("/api/v1/auth/config");
+  const tenant = new URLSearchParams(window.location.search).get("tenant") ?? "";
+  const response = await fetch(`/api/v1/auth/config${tenant ? `?tenant_slug=${encodeURIComponent(tenant)}` : ""}`);
   if (!response.ok) throw new Error("Identity configuration is unavailable.");
   config = (await response.json()) as PublicConfig;
   return config;
@@ -37,7 +39,9 @@ export async function authConfig(): Promise<PublicConfig> {
 export async function authManager(): Promise<UserManager> {
   if (manager) return manager;
   const publicConfig = await authConfig();
+  if (publicConfig.protocol !== "oidc") throw new Error("This tenant requires the configured SAML sign-in service.");
   if (!publicConfig.authority || !publicConfig.client_id) throw new Error("OIDC is not configured.");
+  const tenant = new URLSearchParams(window.location.search).get("tenant") ?? "";
   const settings: UserManagerSettings = {
     authority: publicConfig.authority,
     client_id: publicConfig.client_id,
@@ -45,7 +49,7 @@ export async function authManager(): Promise<UserManager> {
     post_logout_redirect_uri: window.location.origin,
     response_type: "code",
     scope: publicConfig.scope,
-    metadataUrl: `${window.location.origin}/api/v1/auth/metadata`,
+    metadataUrl: `${window.location.origin}/api/v1/auth/metadata${tenant ? `?tenant_slug=${encodeURIComponent(tenant)}` : ""}`,
     automaticSilentRenew: false,
     monitorSession: true,
   };

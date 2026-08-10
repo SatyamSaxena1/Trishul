@@ -12,7 +12,7 @@ from django.utils import timezone
 from rest_framework import authentication, exceptions
 
 from .dev_auth import PERSONA_USERNAMES
-from .models import Membership, ServiceAccount
+from .models import IdentityProviderConfiguration, Membership, ServiceAccount
 from .tenancy import set_current_tenant
 
 logger = logging.getLogger(__name__)
@@ -230,35 +230,60 @@ class DevAuthentication(authentication.BaseAuthentication):
 
 
 class OIDCBearerAuthentication(authentication.BaseAuthentication):
-    _jwks_client = None
+    _jwks_clients = {}
+
+    @classmethod
+    def _configuration(cls, token):
+        unverified = jwt.decode(token, options={"verify_signature": False, "verify_aud": False})
+        audiences = unverified.get("aud", [])
+        audiences = {audiences} if isinstance(audiences, str) else set(audiences)
+        configured = list(
+            IdentityProviderConfiguration.all_objects.filter(
+                protocol=IdentityProviderConfiguration.Protocol.OIDC,
+                enabled=True,
+                issuer=unverified.get("iss", ""),
+                tenant__is_active=True,
+            ).select_related("tenant")
+        )
+        matches = [item for item in configured if item.audience in audiences]
+        if len(matches) > 1:
+            raise exceptions.AuthenticationFailed("Identity configuration is ambiguous.")
+        return matches[0] if matches else None
 
     def authenticate(self, request):
         header = authentication.get_authorization_header(request).decode()
         if not header.startswith("Bearer ") or header.startswith("Bearer trishul."):
             return None
-        if not all([settings.OIDC_ISSUER, settings.OIDC_AUDIENCE, settings.OIDC_JWKS_URL]):
-            raise exceptions.AuthenticationFailed("OIDC is not configured.")
         token = header.split(" ", 1)[1]
         try:
-            if self.__class__._jwks_client is None:
-                self.__class__._jwks_client = jwt.PyJWKClient(settings.OIDC_JWKS_URL, cache_jwk_set=True, lifespan=300)
-            signing_key = self.__class__._jwks_client.get_signing_key_from_jwt(token)
+            configuration = self._configuration(token)
+            issuer = configuration.issuer if configuration else settings.OIDC_ISSUER
+            audience = configuration.audience if configuration else settings.OIDC_AUDIENCE
+            jwks_url = configuration.jwks_url if configuration else settings.OIDC_JWKS_URL
+            if not all((issuer, audience, jwks_url)):
+                raise exceptions.AuthenticationFailed("OIDC is not configured.")
+            client = self.__class__._jwks_clients.setdefault(
+                jwks_url, jwt.PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=300)
+            )
+            signing_key = client.get_signing_key_from_jwt(token)
             claims = jwt.decode(
                 token,
                 signing_key.key,
                 algorithms=["RS256", "RS384", "RS512", "ES256", "ES384", "ES512"],
-                audience=settings.OIDC_AUDIENCE,
-                issuer=settings.OIDC_ISSUER,
+                audience=audience,
+                issuer=issuer,
                 options={"require": ["exp", "iat", "iss", "aud", "sub"]},
                 leeway=30,
             )
         except jwt.PyJWTError as exc:
             logger.warning("OIDC token validation failed: %s", type(exc).__name__)
             raise exceptions.AuthenticationFailed("Invalid identity token.") from exc
-        if settings.OIDC_MFA_REQUIRED:
+        mfa_required = configuration.mfa_required if configuration else settings.OIDC_MFA_REQUIRED
+        allowed_acr = set(configuration.allowed_acr_values) if configuration else settings.OIDC_MFA_ACR_VALUES
+        if mfa_required:
             amr = set(claims.get("amr", []))
             acr = claims.get("acr", "")
-            if "mfa" not in amr and acr not in settings.OIDC_MFA_ACR_VALUES:
+            if "mfa" not in amr and acr not in allowed_acr:
                 raise exceptions.AuthenticationFailed("MFA-authenticated identity is required.")
         subject = claims["sub"]
         user, _ = get_user_model().objects.update_or_create(
@@ -268,6 +293,8 @@ class OIDCBearerAuthentication(authentication.BaseAuthentication):
         if connection.vendor == "postgresql":
             with connection.cursor() as cursor:
                 cursor.execute("SELECT set_config('trishul.user_id', %s, true)", [str(user.id)])
+        if configuration:
+            claims["trishul_tenant_id"] = str(configuration.tenant_id)
         return user, claims
 
 
@@ -299,6 +326,9 @@ def resolve_tenant(request):
             membership = found[0]
         request.membership = membership
         tenant = membership.tenant
+        identity_tenant = request.auth.get("trishul_tenant_id") if isinstance(request.auth, dict) else None
+        if identity_tenant and str(tenant.id) != identity_tenant:
+            raise exceptions.PermissionDenied("The identity provider does not authorize the selected tenant.")
     set_current_tenant(tenant.id)
     request.tenant = tenant
     if connection.vendor == "postgresql":

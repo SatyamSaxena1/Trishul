@@ -133,6 +133,10 @@ Rotate OIDC/service credentials and application secrets in Secrets Manager, wait
 
 Suspension sets `Tenant.is_active=false`, revokes service tokens, and closes active sessions; it does not delete evidence. Export through an authorized auditee/platform workflow to a tenant-scoped encrypted archive containing database records, object versions, and an audit checkpoint. Verify counts and hashes before delivery.
 
+### Tenant identity configuration
+
+Tenant administrators configure public OIDC or SAML metadata through `/api/v1/identity-providers/`; credential values remain in the existing secret store and only `secret_reference` is accepted. Validate metadata with the configuration's `validate` action before enabling customer access. OIDC login starts at `/?tenant=<tenant-slug>` and tokens are cryptographically bound to that tenant, even when the user has memberships elsewhere. SAML metadata can be validated, but SAML ACS interoperability is not yet implemented and must not be represented as a working login. Session-policy records capture intended idle, absolute, concurrency and MFA requirements; enforcement beyond token expiry remains pending.
+
 Deletion is a two-person operator procedure: suspend, export if contractually required, wait the configured retention/legal-hold period, delete tenant-prefixed object versions, then delete database rows in dependency order under owner context and record an external deletion certificate. Shared backup copies age out under backup retention and cannot promise immediate physical erasure; disclose that before deletion. There is no self-service hard-delete endpoint in this release.
 
 ### Incident response and analyzer compromise
