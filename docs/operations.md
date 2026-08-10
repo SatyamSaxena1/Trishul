@@ -99,6 +99,13 @@ Evidence lifecycle fields supplied by a client are ignored, existing records can
 deleted, and every uploaded replacement receives a new object key. Bucket versioning and retention
 remain defence in depth.
 
+### Assessment scoring
+
+`GET /api/v1/assessments/{id}/score/` returns the live assessment score. Compliant responses score
+100 points, partial responses 50, and other applicable responses zero. Not-applicable responses are
+excluded from the denominator and require a human review plus a non-empty justification. A score is
+`null` when the assessment has no applicable responses.
+
 ## SaaS runbooks
 
 ### Disaster recovery

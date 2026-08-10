@@ -232,6 +232,9 @@ class AssessmentResponseSerializer(TenantModelSerializer):
         has_existing = self.instance and self.instance.evidence.exists()
         if decision == AssessmentResponse.Decision.COMPLIANT and not evidence and not has_existing:
             raise serializers.ValidationError({"evidence": "A compliant conclusion requires evidence."})
+        rationale = attrs.get("rationale", getattr(self.instance, "rationale", ""))
+        if decision == AssessmentResponse.Decision.NOT_APPLICABLE and not rationale.strip():
+            raise serializers.ValidationError({"rationale": "Not-applicable conclusions require justification."})
         return attrs
 
 

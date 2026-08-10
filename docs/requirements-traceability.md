@@ -1,6 +1,6 @@
 # Concept-note requirements traceability
 
-Baseline: `main` at `be2ada3` on 10 August 2026, plus the active safe-upload slice.
+Baseline: `main` at `42824d9` on 10 August 2026, plus the active assessment-scoring slice.
 
 Status is deliberately conservative: **implemented** means a usable, tested path;
 **partial** means a schema, API, or narrow path exists; **planned** means no
@@ -42,7 +42,7 @@ the GRC/TPRM programme, not a compliance attestation.
 | BR-61 | AI never issues final audit verdicts. | Partial | Suggestion-only AI contract and human-verdict integration tests. |
 | BR-62 | AI decisions preserve provider/model/prompt/sources/confidence. | Partial | Immutable AI-run schema with citation and prompt tests. |
 | BR-63 | Critical non-compliance caps framework score. | Planned | Configurable score/cap test suite. |
-| BR-64 | Not Applicable requires justification and is excluded from scoring. | Partial | Validation and score-exclusion tests. |
+| BR-64 | Not Applicable requires justification and is excluded from scoring. | Implemented | Model/API justification guards, human-review enforcement and score-exclusion test. |
 | BR-65 | Below-threshold evidence requires a justified override. | Planned | Quality threshold and override audit test. |
 | BR-66 | Evidence uploader cannot verdict the same control. | Partial | Cross-identity verdict denial test. |
 | BR-67 | Overdue policies reduce supported-control maturity. | Planned | Policy expiry scheduler and maturity recalculation test. |
