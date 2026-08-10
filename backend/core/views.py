@@ -2,10 +2,14 @@ import hashlib
 import hmac
 import html
 import io
+import ipaddress
 import json
 import logging
+import re
+import socket
 import uuid
 from datetime import timedelta
+from urllib.parse import urlparse
 
 import httpx
 import redis
@@ -58,6 +62,7 @@ from .models import (
     Framework,
     FrameworkControlMapping,
     FrameworkVersion,
+    IdentityProviderConfiguration,
     Job,
     Membership,
     ModelConfiguration,
@@ -83,6 +88,7 @@ from .models import (
     TenantEntitlement,
     TenantInvitation,
     TenantRelationship,
+    TenantSessionPolicy,
     TenantSubscription,
     Threat,
     ThreatModel,
@@ -107,6 +113,15 @@ from .storage import put_file
 from .tenancy import engagement_target_context, tenant_context
 
 logger = logging.getLogger(__name__)
+
+
+def validate_identity_url(url):
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Identity metadata requires an HTTPS authority.")
+    for result in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM):
+        if not ipaddress.ip_address(result[4][0]).is_global:
+            raise ValueError("Identity metadata resolves to a non-public address.")
 
 
 class PreconditionRequired(exceptions.APIException):
@@ -138,6 +153,8 @@ PERMISSION_PREFIX = {
     TenantEntitlement: "subscription",
     UsageRecord: "usage",
     TenantBranding: "branding",
+    IdentityProviderConfiguration: "tenant",
+    TenantSessionPolicy: "tenant",
     TenantInvitation: "membership",
     Engagement: "engagement",
     EngagementScope: "engagement",
@@ -393,6 +410,44 @@ def viewset_for(model, *, immutable=False):
         (TenantModelViewSet,),
         {"model": model, "serializer_class": SERIALIZERS[model], "immutable": immutable},
     )
+
+
+class IdentityProviderConfigurationViewSet(viewset_for(IdentityProviderConfiguration)):
+    @action(detail=True, methods=["post"])
+    def validate(self, request, pk=None):
+        configuration = self.get_object()
+        url = configuration.metadata_url
+        if configuration.protocol == IdentityProviderConfiguration.Protocol.OIDC:
+            url = configuration.discovery_url or f"{configuration.issuer.rstrip('/')}/.well-known/openid-configuration"
+        try:
+            validate_identity_url(url)
+            response = httpx.get(url, timeout=5, follow_redirects=False)
+            response.raise_for_status()
+            if configuration.protocol == IdentityProviderConfiguration.Protocol.OIDC:
+                metadata = response.json()
+                valid = (
+                    metadata.get("issuer") == configuration.issuer
+                    and metadata.get("jwks_uri") == configuration.jwks_url
+                    and str(metadata.get("authorization_endpoint", "")).startswith("https://")
+                    and str(metadata.get("token_endpoint", "")).startswith("https://")
+                )
+            else:
+                metadata = response.text[:1_000_000]
+                valid = bool(
+                    re.search(
+                        rf"<(?:\w+:)?EntityDescriptor\b[^>]*\bentityID=[\"']{re.escape(configuration.issuer)}[\"']",
+                        metadata,
+                    )
+                )
+            if not valid:
+                raise ValueError("Identity metadata does not match the configured provider.")
+        except (httpx.HTTPError, ValueError, OSError) as exc:
+            raise exceptions.ValidationError({"provider": "Identity provider validation failed."}) from exc
+        configuration.validated_at = timezone.now()
+        configuration.version += 1
+        configuration.save(update_fields=["validated_at", "version", "updated_at"])
+        self._audit("identity_provider.validated", configuration)
+        return Response(self.get_serializer(configuration).data)
 
 
 class ServiceAccountViewSet(viewset_for(ServiceAccount)):
@@ -1793,6 +1848,8 @@ MODEL_VIEWSETS = {
     "tenant-entitlements": readonly_viewset_for(TenantEntitlement),
     "usage-records": readonly_viewset_for(UsageRecord),
     "tenant-branding": viewset_for(TenantBranding),
+    "identity-providers": IdentityProviderConfigurationViewSet,
+    "session-policy": viewset_for(TenantSessionPolicy),
     "tenant-invitations": TenantInvitationViewSet,
     "engagements": EngagementViewSet,
     "engagement-scopes": viewset_for(EngagementScope),
@@ -1886,13 +1943,22 @@ def oidc_config(request):
             for username, label, role, _ in PERSONAS
             if username in memberships
         ]
+    identity = None
+    tenant_slug = request.query_params.get("tenant_slug", "")
+    if tenant_slug and not settings.TRISHUL_DEV_AUTH:
+        identity = (
+            IdentityProviderConfiguration.all_objects.filter(tenant__slug=tenant_slug, enabled=True)
+            .select_related("tenant")
+            .first()
+        )
     return Response(
         {
             "dev_auth_enabled": settings.TRISHUL_DEV_AUTH,
             "dev_personas": personas,
-            "authority": settings.OIDC_ISSUER,
-            "client_id": settings.OIDC_CLIENT_ID,
-            "audience": settings.OIDC_AUDIENCE,
+            "protocol": identity.protocol if identity else "oidc",
+            "authority": identity.issuer if identity else settings.OIDC_ISSUER,
+            "client_id": identity.client_id if identity else settings.OIDC_CLIENT_ID,
+            "audience": identity.audience if identity else settings.OIDC_AUDIENCE,
             "redirect_uri": request.build_absolute_uri("/auth/callback"),
             "scope": "openid profile email",
         }
@@ -1903,14 +1969,26 @@ def oidc_config(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def oidc_metadata(request):
-    if not settings.OIDC_ISSUER:
+    identity = None
+    tenant_slug = request.query_params.get("tenant_slug", "")
+    if tenant_slug:
+        identity = IdentityProviderConfiguration.all_objects.filter(
+            tenant__slug=tenant_slug,
+            protocol=IdentityProviderConfiguration.Protocol.OIDC,
+            enabled=True,
+        ).first()
+    issuer = identity.issuer if identity else settings.OIDC_ISSUER
+    if not issuer:
         return Response({"detail": "OIDC is not configured."}, status=503)
-    discovery_url = settings.OIDC_DISCOVERY_URL or (
-        f"{settings.OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration"
+    discovery_url = (
+        identity.discovery_url
+        if identity and identity.discovery_url
+        else settings.OIDC_DISCOVERY_URL or f"{issuer.rstrip('/')}/.well-known/openid-configuration"
     )
     if not discovery_url.startswith("https://"):
         return Response({"detail": "OIDC discovery must use HTTPS."}, status=503)
     try:
+        validate_identity_url(discovery_url)
         response = httpx.get(
             discovery_url,
             timeout=5,
@@ -1919,13 +1997,13 @@ def oidc_metadata(request):
         )
         response.raise_for_status()
         metadata = response.json()
-        if metadata.get("issuer") != settings.OIDC_ISSUER:
+        if metadata.get("issuer") != issuer:
             raise ValueError("OIDC discovery issuer mismatch")
         for key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
             if not str(metadata.get(key, "")).startswith("https://"):
                 raise ValueError(f"OIDC {key} must use HTTPS")
         return Response(metadata)
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, ValueError, OSError):
         logger.exception("OIDC discovery failed")
         return Response({"detail": "OIDC discovery is unavailable."}, status=503)
 

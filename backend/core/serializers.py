@@ -29,6 +29,7 @@ from .models import (
     Framework,
     FrameworkControlMapping,
     FrameworkVersion,
+    IdentityProviderConfiguration,
     Job,
     Membership,
     ModelConfiguration,
@@ -55,6 +56,7 @@ from .models import (
     TenantInvitation,
     TenantRelationship,
     TenantScopedModel,
+    TenantSessionPolicy,
     TenantSubscription,
     Threat,
     ThreatModel,
@@ -111,6 +113,9 @@ UsageRecordSerializer = serializer_for(
     UsageRecord, read_only_fields=tuple(field.name for field in UsageRecord._meta.fields)
 )
 TenantBrandingSerializer = serializer_for(TenantBranding)
+IdentityProviderConfigurationSerializer = serializer_for(IdentityProviderConfiguration)
+IdentityProviderConfigurationSerializer.Meta.extra_kwargs = {"secret_reference": {"write_only": True}}
+TenantSessionPolicySerializer = serializer_for(TenantSessionPolicy)
 TenantInvitationSerializer = serializer_for(
     TenantInvitation, read_only_fields=("target_tenant", "invited_by", "accepted_at")
 )
@@ -347,6 +352,8 @@ SERIALIZERS = {
     TenantEntitlement: TenantEntitlementSerializer,
     UsageRecord: UsageRecordSerializer,
     TenantBranding: TenantBrandingSerializer,
+    IdentityProviderConfiguration: IdentityProviderConfigurationSerializer,
+    TenantSessionPolicy: TenantSessionPolicySerializer,
     TenantInvitation: TenantInvitationSerializer,
     Engagement: EngagementSerializer,
     EngagementScope: EngagementScopeSerializer,

@@ -2,6 +2,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from urllib.parse import urlparse
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -233,6 +234,62 @@ class TenantBranding(TenantScopedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant"], name="tenant_branding_uniq")]
+
+
+class IdentityProviderConfiguration(TenantScopedModel):
+    class Protocol(models.TextChoices):
+        OIDC = "oidc", "OpenID Connect"
+        SAML = "saml", "SAML 2.0"
+
+    protocol = models.CharField(max_length=10, choices=Protocol.choices)
+    name = models.CharField(max_length=120)
+    issuer = models.URLField()
+    discovery_url = models.URLField(blank=True)
+    client_id = models.CharField(max_length=200, blank=True)
+    audience = models.CharField(max_length=200, blank=True)
+    jwks_url = models.URLField(blank=True)
+    metadata_url = models.URLField(blank=True)
+    secret_reference = models.CharField(max_length=300, blank=True)
+    attribute_mapping = models.JSONField(default=dict, blank=True)
+    mfa_required = models.BooleanField(default=True)
+    allowed_acr_values = models.JSONField(default=list, blank=True)
+    enabled = models.BooleanField(default=False)
+    validated_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "protocol"], name="tenant_identity_protocol_uniq")]
+
+    def clean(self):
+        super().clean()
+        if (
+            self.enabled
+            and self.protocol == self.Protocol.OIDC
+            and not all((self.client_id, self.audience, self.jwks_url))
+        ):
+            raise ValidationError("Enabled OIDC configuration requires client_id, audience and jwks_url.")
+        if self.enabled and self.protocol == self.Protocol.SAML and not self.metadata_url:
+            raise ValidationError("Enabled SAML configuration requires metadata_url.")
+        urls = [self.issuer]
+        urls.extend([self.jwks_url, self.discovery_url] if self.protocol == self.Protocol.OIDC else [self.metadata_url])
+        for value in filter(None, urls):
+            parsed = urlparse(value)
+            if parsed.scheme != "https" and not (settings.DEBUG and parsed.hostname in {"localhost", "127.0.0.1"}):
+                raise ValidationError("Identity provider endpoints must use HTTPS.")
+
+
+class TenantSessionPolicy(TenantScopedModel):
+    idle_timeout_minutes = models.PositiveIntegerField(default=30)
+    absolute_timeout_minutes = models.PositiveIntegerField(default=720)
+    max_concurrent_sessions = models.PositiveSmallIntegerField(default=5)
+    require_mfa = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant"], name="tenant_session_policy_uniq")]
+
+    def clean(self):
+        super().clean()
+        if self.idle_timeout_minutes > self.absolute_timeout_minutes:
+            raise ValidationError({"idle_timeout_minutes": "Idle timeout cannot exceed the absolute timeout."})
 
 
 class TenantInvitation(TenantScopedModel):
