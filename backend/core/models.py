@@ -843,6 +843,11 @@ class AssessmentResponse(TenantScopedModel):
     review_status = models.CharField(max_length=30, default="pending")
     reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True)
 
+    def clean(self):
+        super().clean()
+        if self.decision == self.Decision.NOT_APPLICABLE and not self.rationale.strip():
+            raise ValidationError({"rationale": "Not-applicable conclusions require justification."})
+
 
 class AssessmentEvidence(TenantScopedModel):
     response = models.ForeignKey(AssessmentResponse, on_delete=models.PROTECT)

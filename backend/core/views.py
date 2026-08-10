@@ -578,6 +578,32 @@ class AssessmentResponseViewSet(viewset_for(AssessmentResponse)):
         super().perform_update(serializer)
 
 
+class AssessmentViewSet(viewset_for(Assessment)):
+    @action(detail=True, methods=["get"])
+    def score(self, request, pk=None):
+        assessment = self.get_object()
+        counts = {
+            row["decision"]: row["total"]
+            for row in assessment.responses.values("decision").annotate(total=models.Count("id"))
+        }
+        excluded = counts.get(AssessmentResponse.Decision.NOT_APPLICABLE, 0)
+        applicable = sum(counts.values()) - excluded
+        points = (
+            counts.get(AssessmentResponse.Decision.COMPLIANT, 0) * 100
+            + counts.get(AssessmentResponse.Decision.PARTIAL, 0) * 50
+        )
+        score = f"{points / applicable:.2f}" if applicable else None
+        return Response(
+            {
+                "assessment_id": str(assessment.id),
+                "score": score,
+                "applicable_responses": applicable,
+                "excluded_not_applicable": excluded,
+                "counts": counts,
+            }
+        )
+
+
 def _install_subscription(*, tenant, plan_key, plan_version, entitlements, trial_days=0):
     now = timezone.now()
     TenantSubscription.all_objects.create(
@@ -1510,7 +1536,7 @@ MODEL_VIEWSETS = {
     "organisation-controls": OrganisationControlViewSet,
     "control-assignments": viewset_for(ControlAssignment),
     "control-evidence-links": readonly_viewset_for(ControlEvidenceLink),
-    "assessments": viewset_for(Assessment),
+    "assessments": AssessmentViewSet,
     "assessment-responses": AssessmentResponseViewSet,
     "assessment-evidence": viewset_for(AssessmentEvidence, immutable=True),
     "evidence": EvidenceViewSet,
