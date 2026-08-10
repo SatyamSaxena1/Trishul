@@ -2,6 +2,7 @@ import hashlib
 import json
 import secrets
 import uuid
+from datetime import timedelta
 from urllib.parse import urlparse
 
 from django.conf import settings
@@ -302,6 +303,43 @@ class AuthSession(TenantScopedModel):
 
     class Meta:
         indexes = [models.Index(fields=["tenant", "user", "revoked_at"], name="auth_session_active_idx")]
+
+
+class BreakGlassGrant(TenantScopedModel):
+    class Status(models.TextChoices):
+        REQUESTED = "requested", "Requested"
+        APPROVED = "approved", "Approved"
+        REVOKED = "revoked", "Revoked"
+
+    requester = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="break_glass_requests"
+    )
+    approver = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="break_glass_approvals"
+    )
+    reason = models.TextField(max_length=2000)
+    scopes = models.JSONField(default=list)
+    source_metadata = models.JSONField(default=dict, blank=True)
+    starts_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+    approved_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.REQUESTED)
+
+    def clean(self):
+        super().clean()
+        if not self.reason.strip():
+            raise ValidationError({"reason": "A break-glass reason is required."})
+        if self.starts_at >= self.expires_at:
+            raise ValidationError({"expires_at": "Expiry must be after the start time."})
+        if self.expires_at > self.starts_at + timedelta(hours=4):
+            raise ValidationError({"expires_at": "Break-glass access is limited to four hours."})
+
+
+class TenantNotification(TenantScopedModel):
+    kind = models.CharField(max_length=80)
+    payload = models.JSONField(default=dict)
+    occurred_at = models.DateTimeField(default=timezone.now)
 
 
 class TenantInvitation(TenantScopedModel):

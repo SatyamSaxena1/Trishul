@@ -139,6 +139,8 @@ Tenant administrators configure public OIDC or SAML metadata through `/api/v1/id
 
 Tenant session policy enforces MFA, idle timeout, absolute timeout and concurrent browser-session limits for tenant-configured OIDC. When the concurrency limit is reached the oldest session is revoked and audited. Users can list and revoke only their own sessions through `/api/v1/sessions/`. Global legacy OIDC remains governed by token expiry until it is migrated to tenant configuration.
 
+Break-glass is never standing tenant access. A platform administrator requests up to four hours of allow-listed read permissions through `/api/v1/tenant-admin/break-glass/`; a distinct tenant administrator approves it through `/api/v1/break-glass-grants/{id}/approve/`. Every request must carry the target tenant and grant ID, every use is audited, and revocation or expiry denies the next request. Approval creates a tenant-visible durable notification. The grant cannot write, unlock controls, mutate evidence, or bypass RLS.
+
 Invitation and SCIM tokens are returned only on creation and stored as SHA-256 digests. Invitation acceptance requires an authenticated user whose email matches, and each token expires, can be revoked, and is single-use. Existing pre-migration invitations are revoked because their plaintext tokens cannot be recovered.
 
 Create a SCIM credential at `/api/v1/scim-credentials/`, retain the returned `scim.*` token, and configure the provider against `/api/v1/scim/v2/<tenant-slug>/Users`. `externalId` must carry the immutable provider subject used at login. The endpoint supports `userName eq` lookup and activation changes; deactivation changes only the selected tenant membership.

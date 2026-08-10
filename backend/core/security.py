@@ -16,6 +16,7 @@ from .dev_auth import PERSONA_USERNAMES
 from .models import (
     AuditEvent,
     AuthSession,
+    BreakGlassGrant,
     IdentityProviderConfiguration,
     Membership,
     ServiceAccount,
@@ -24,6 +25,17 @@ from .models import (
 from .tenancy import set_current_tenant
 
 logger = logging.getLogger(__name__)
+
+BREAK_GLASS_PERMISSIONS = {
+    "tenant.read",
+    "application.read",
+    "control.read",
+    "evidence.read",
+    "risk.read",
+    "task.read",
+    "report.read",
+    "audit.read",
+}
 
 ROLE_PERMISSIONS = {
     "admin": {"*"},
@@ -59,6 +71,7 @@ ROLE_PERMISSIONS = {
     "org_admin": {
         "tenant.manage",
         "membership.manage",
+        "membership.read",
         "application.read",
         "application.write",
         "control.read",
@@ -384,10 +397,45 @@ def resolve_tenant(request):
         request.membership = None
         tenant = request.user.account.tenant
     else:
+        requested = request.headers.get("X-Trishul-Tenant")
+        grant_id = request.headers.get("X-Trishul-Break-Glass")
+        if grant_id:
+            try:
+                tenant_id, grant_uuid = UUID(requested or ""), UUID(grant_id)
+            except ValueError as exc:
+                raise exceptions.AuthenticationFailed("Invalid break-glass context.") from exc
+            set_current_tenant(tenant_id)
+            if connection.vendor == "postgresql":
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('trishul.tenant_id', %s, true)", [str(tenant_id)])
+            now = timezone.now()
+            grant = BreakGlassGrant.objects.filter(
+                pk=grant_uuid,
+                requester=request.user,
+                status=BreakGlassGrant.Status.APPROVED,
+                approved_at__isnull=False,
+                revoked_at__isnull=True,
+                starts_at__lte=now,
+                expires_at__gt=now,
+            ).select_related("tenant").first()
+            if not grant or not set(grant.scopes).issubset(BREAK_GLASS_PERMISSIONS):
+                raise exceptions.PermissionDenied("Break-glass access is unavailable.")
+            request.membership = None
+            request.break_glass_grant = grant
+            request.tenant = grant.tenant
+            AuditEvent.append(
+                tenant=grant.tenant,
+                actor_type="user",
+                actor_id=str(request.user.id),
+                action="break_glass.used",
+                resource_type="http.request",
+                resource_id=request.path[:200],
+                details={"grant_id": str(grant.id), "reason": grant.reason},
+            )
+            return grant.tenant
         memberships = Membership.all_objects.filter(
             user=request.user, is_active=True, tenant__is_active=True
         ).select_related("tenant")
-        requested = request.headers.get("X-Trishul-Tenant")
         if requested:
             try:
                 tenant_id = UUID(requested)
@@ -421,6 +469,8 @@ def resolve_tenant(request):
 def principal_permissions(request) -> set[str]:
     if isinstance(request.user, ServicePrincipal):
         return set(request.user.account.scopes)
+    if grant := getattr(request, "break_glass_grant", None):
+        return set(grant.scopes)
     membership = request.membership
     return ROLE_PERMISSIONS.get(membership.role, set()) | set(membership.extra_permissions)
 
@@ -430,11 +480,14 @@ def has_permission(request, permission: str) -> bool:
     if "*" not in permissions and permission not in permissions:
         return False
     application_id = getattr(request, "application_id", None)
-    restrictions = (
+    if getattr(request, "break_glass_grant", None):
+        restrictions = []
+    else:
+        restrictions = (
         request.user.account.application_ids
         if isinstance(request.user, ServicePrincipal)
         else request.membership.application_ids
-    )
+        )
     return not restrictions or not application_id or str(application_id) in restrictions
 
 
