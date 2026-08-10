@@ -13,6 +13,7 @@ from .models import (
     AuditEvent,
     AuditorVerdict,
     AuthSession,
+    BreakGlassGrant,
     ComplianceGap,
     ControlAssignment,
     ControlEvidenceLink,
@@ -57,6 +58,7 @@ from .models import (
     TenantBranding,
     TenantEntitlement,
     TenantInvitation,
+    TenantNotification,
     TenantRelationship,
     TenantScopedModel,
     TenantSessionPolicy,
@@ -121,6 +123,12 @@ IdentityProviderConfigurationSerializer.Meta.extra_kwargs = {"secret_reference":
 TenantSessionPolicySerializer = serializer_for(TenantSessionPolicy)
 AuthSessionSerializer = serializer_for(
     AuthSession, read_only_fields=tuple(field.name for field in AuthSession._meta.fields)
+)
+BreakGlassGrantSerializer = serializer_for(
+    BreakGlassGrant, read_only_fields=("requester", "approver", "approved_at", "revoked_at", "status")
+)
+TenantNotificationSerializer = serializer_for(
+    TenantNotification, read_only_fields=tuple(field.name for field in TenantNotification._meta.fields)
 )
 TenantInvitationSerializer = serializer_for(
     TenantInvitation,
@@ -366,7 +374,9 @@ SERIALIZERS = {
     IdentityProviderConfiguration: IdentityProviderConfigurationSerializer,
     TenantSessionPolicy: TenantSessionPolicySerializer,
     AuthSession: AuthSessionSerializer,
+    BreakGlassGrant: BreakGlassGrantSerializer,
     TenantInvitation: TenantInvitationSerializer,
+    TenantNotification: TenantNotificationSerializer,
     ScimCredential: ScimCredentialSerializer,
     ScimIdentity: ScimIdentitySerializer,
     Engagement: EngagementSerializer,

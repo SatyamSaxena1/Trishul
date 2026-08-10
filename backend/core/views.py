@@ -19,6 +19,7 @@ from django.db import connection, models, transaction
 from django.db.models import Sum
 from django.http import HttpResponse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from rest_framework import exceptions, status, viewsets
 from rest_framework.decorators import action, api_view, authentication_classes, permission_classes
@@ -46,6 +47,7 @@ from .models import (
     AuditEvent,
     AuditorVerdict,
     AuthSession,
+    BreakGlassGrant,
     ComplianceGap,
     ControlAssignment,
     ControlEvidenceLink,
@@ -91,6 +93,7 @@ from .models import (
     TenantBranding,
     TenantEntitlement,
     TenantInvitation,
+    TenantNotification,
     TenantRelationship,
     TenantSessionPolicy,
     TenantSubscription,
@@ -101,7 +104,7 @@ from .models import (
     Workspace,
 )
 from .risk import FORMULA_VERSION, calculate
-from .security import ServicePrincipal, has_permission, principal_permissions, resolve_tenant
+from .security import BREAK_GLASS_PERMISSIONS, ServicePrincipal, has_permission, principal_permissions, resolve_tenant
 from .serializers import (
     SERIALIZERS,
     AuditeeOnboardingSerializer,
@@ -160,7 +163,9 @@ PERMISSION_PREFIX = {
     IdentityProviderConfiguration: "tenant",
     TenantSessionPolicy: "tenant",
     AuthSession: "membership",
+    BreakGlassGrant: "membership",
     TenantInvitation: "membership",
+    TenantNotification: "membership",
     ScimCredential: "membership",
     Engagement: "engagement",
     EngagementScope: "engagement",
@@ -279,6 +284,8 @@ def actor(request):
 def application_restrictions(request):
     if isinstance(request.user, ServicePrincipal):
         return request.user.account.application_ids
+    if getattr(request, "break_glass_grant", None):
+        return []
     return request.membership.application_ids
 
 
@@ -984,6 +991,86 @@ class TenantAdminViewSet(viewsets.ViewSet):
                 details={"plan": f"{plan.key}@{plan.plan_version}", "isolation_tier": firm.isolation_tier},
             )
         return Response(TenantSummarySerializer(firm).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["post"], url_path="break-glass")
+    def break_glass(self, request):
+        reason = str(request.data.get("reason", "")).strip()
+        scopes = request.data.get("scopes", [])
+        expires_at = parse_datetime(str(request.data.get("expires_at", "")))
+        try:
+            target = Tenant.objects.get(pk=request.data.get("target_tenant"), is_active=True)
+        except (Tenant.DoesNotExist, ValueError, TypeError) as exc:
+            raise exceptions.ValidationError({"target_tenant": "An active target tenant is required."}) from exc
+        if not reason:
+            raise exceptions.ValidationError({"reason": "A break-glass reason is required."})
+        if not isinstance(scopes, list) or not scopes or not set(scopes).issubset(BREAK_GLASS_PERMISSIONS):
+            raise exceptions.ValidationError({"scopes": "Only approved break-glass permissions may be requested."})
+        if not expires_at:
+            raise exceptions.ValidationError({"expires_at": "A timezone-aware expiry is required."})
+        with tenant_context(target.id):
+            grant = BreakGlassGrant.objects.create(
+                tenant=target,
+                requester=request.user,
+                reason=reason,
+                scopes=scopes,
+                starts_at=timezone.now(),
+                expires_at=expires_at,
+                source_metadata={"source": str(request.data.get("source", "support"))[:100]},
+            )
+            AuditEvent.append(
+                tenant=target,
+                actor_type="user",
+                actor_id=str(request.user.id),
+                action="break_glass.requested",
+                resource_type="core.breakglassgrant",
+                resource_id=grant.id,
+                details={"reason": reason, "scopes": scopes, "expires_at": expires_at.isoformat()},
+            )
+        return Response(SERIALIZERS[BreakGlassGrant](grant).data, status=status.HTTP_201_CREATED)
+
+
+class BreakGlassGrantViewSet(TenantModelViewSet):
+    model = BreakGlassGrant
+    serializer_class = SERIALIZERS[BreakGlassGrant]
+    http_method_names = ["get", "post", "head", "options"]
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        grant = self.get_object()
+        if grant.requester_id == request.user.id:
+            raise exceptions.PermissionDenied("The requester cannot approve break-glass access.")
+        if grant.status != BreakGlassGrant.Status.REQUESTED:
+            raise exceptions.ValidationError({"grant": "Only requested grants can be approved."})
+        grant.status = BreakGlassGrant.Status.APPROVED
+        grant.approver = request.user
+        grant.approved_at = timezone.now()
+        grant.version += 1
+        grant.save(update_fields=["status", "approver", "approved_at", "version", "updated_at"])
+        notification = TenantNotification.objects.create(
+            tenant=request.tenant,
+            kind="break_glass.approved",
+            payload={
+                "grant_id": str(grant.id),
+                "actor": str(grant.requester_id),
+                "reason": grant.reason,
+                "starts_at": grant.starts_at.isoformat(),
+                "expires_at": grant.expires_at.isoformat(),
+                "scopes": grant.scopes,
+            },
+        )
+        self._audit("break_glass.approved", grant)
+        self._audit("notification.created", notification)
+        return Response(self.get_serializer(grant).data)
+
+    @action(detail=True, methods=["post"])
+    def revoke(self, request, pk=None):
+        grant = self.get_object()
+        grant.status = BreakGlassGrant.Status.REVOKED
+        grant.revoked_at = timezone.now()
+        grant.version += 1
+        grant.save(update_fields=["status", "revoked_at", "version", "updated_at"])
+        self._audit("break_glass.revoked", grant)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class OrganisationControlViewSet(viewset_for(OrganisationControl)):
@@ -2081,6 +2168,8 @@ MODEL_VIEWSETS = {
     "identity-providers": IdentityProviderConfigurationViewSet,
     "session-policy": viewset_for(TenantSessionPolicy),
     "sessions": AuthSessionViewSet,
+    "break-glass-grants": BreakGlassGrantViewSet,
+    "tenant-notifications": readonly_viewset_for(TenantNotification),
     "tenant-invitations": TenantInvitationViewSet,
     "scim-credentials": ScimCredentialViewSet,
     "engagements": EngagementViewSet,
