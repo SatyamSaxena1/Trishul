@@ -48,6 +48,9 @@ def database_config(url: str) -> dict:
 
 
 DEBUG = env_bool("DEBUG")
+TRISHUL_DEV_AUTH = env_bool("TRISHUL_DEV_AUTH")
+if TRISHUL_DEV_AUTH and not DEBUG:
+    raise RuntimeError("TRISHUL_DEV_AUTH is strictly local and requires DEBUG=true")
 SECRET_KEY = secret("DJANGO_SECRET_KEY", "unsafe-development-key" if DEBUG else "")
 if not SECRET_KEY:
     raise RuntimeError("DJANGO_SECRET_KEY or DJANGO_SECRET_KEY_FILE is required")
@@ -63,6 +66,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "core",
+    "workflow",
     "deployment_assurance",
 ]
 
@@ -93,6 +97,7 @@ STATIC_URL = "/static/"
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "core.security.ServiceTokenAuthentication",
+        "core.security.DevAuthentication",
         "core.security.OIDCBearerAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
@@ -150,6 +155,8 @@ S3_BUCKET = os.getenv("S3_BUCKET", "trishul")
 S3_ACCESS_KEY = secret("S3_ACCESS_KEY")
 S3_SECRET_KEY = secret("S3_SECRET_KEY")
 S3_CA_BUNDLE = os.getenv("S3_CA_BUNDLE", "") or None
+AUDIT_CHECKPOINT_BUCKET = os.getenv("AUDIT_CHECKPOINT_BUCKET", "")
+AUDIT_CHECKPOINT_PREFIX = os.getenv("AUDIT_CHECKPOINT_PREFIX", "audit-checkpoints")
 INTERNAL_AI_TOKEN = secret("INTERNAL_AI_TOKEN", "unsafe-development-internal-token" if DEBUG else "")
 METRICS_TOKEN = secret("METRICS_TOKEN")
 

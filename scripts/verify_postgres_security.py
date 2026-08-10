@@ -71,6 +71,36 @@ def verify(owner_dsn, app_dsn):
         pass
 
 
+def verify_workflow(owner_dsn, app_dsn):
+    """Workflow history is tenant-isolated and immutable for every database role."""
+    tenant, _, _, _, _, audit = insert_base_data(owner_dsn)
+    transition = uuid.uuid4()
+    entity = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+    with psycopg.connect(owner_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO workflow_workflowtransition "
+            "(id, created_at, updated_at, version, tenant_id, machine, machine_version, entity_type, entity_id, "
+            "event, from_state, to_state, entity_version_before, entity_version_after, actor_type, actor_id, "
+            "engagement_id, reason, reason_code, idempotency_key, metadata, actor_tenant_id, audit_event_id) "
+            "VALUES (%s, %s, %s, 1, %s, 'test', 1, 'test.entity', %s, 'advance', 'draft', 'active', 1, 2, "
+            "'system', 'security-test', NULL, '', '', '', '{}', NULL, %s)",
+            (transition, now, now, tenant, entity, audit),
+        )
+    with psycopg.connect(app_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM workflow_workflowtransition")
+        assert cursor.fetchone()[0] == 0, "Workflow RLS must fail closed without tenant context"
+        cursor.execute("SELECT set_config('trishul.tenant_id', %s, true)", (str(tenant),))
+        cursor.execute("SELECT id FROM workflow_workflowtransition")
+        assert cursor.fetchall() == [(transition,)], "Workflow RLS exposed the wrong transition"
+    try:
+        with psycopg.connect(owner_dsn) as connection, connection.cursor() as cursor:
+            cursor.execute("UPDATE workflow_workflowtransition SET event = 'tampered' WHERE id = %s", (transition,))
+        raise AssertionError("Workflow immutability trigger accepted mutation")
+    except psycopg.errors.RaiseException:
+        pass
+
+
 def _application(cursor, tenant, now):
     """Create the organization/workspace/application chain for one tenant."""
     organization, workspace, application = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -304,6 +334,7 @@ def verify_engagement_rls(owner_dsn, app_dsn):
 if __name__ == "__main__":
     verify_rls_catalog(os.environ["OWNER_DSN"], os.environ["APP_DSN"])
     verify(os.environ["OWNER_DSN"], os.environ["APP_DSN"])
+    verify_workflow(os.environ["OWNER_DSN"], os.environ["APP_DSN"])
     verify_deployment_assurance(os.environ["OWNER_DSN"], os.environ["APP_DSN"])
     verify_engagement_rls(os.environ["OWNER_DSN"], os.environ["APP_DSN"])
     print("PostgreSQL tenant, engagement, audit and deployment assurance controls verified")

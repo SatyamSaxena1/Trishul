@@ -83,7 +83,7 @@ The protected Prometheus endpoint supplies process/runtime metrics. SaaS signals
 
 ## Shared SaaS deployment
 
-Apply [the AWS Terraform foundation](../deploy/aws/README.md), create the non-bypass `trishul_app` role, install the AWS Load Balancer Controller and External Secrets using workload identity, populate the empty runtime secret, and apply `deploy/kubernetes/base`. Attach the regional WAF ACL and ACM certificate to the public edge ALB. PostgreSQL, Valkey, S3, and metrics stay private. CloudFront, Route 53, SES identity, private EKS endpoint restrictions, and multi-region DR are integration steps and are not provisioned by this repository.
+Apply [the AWS Terraform foundation](../deploy/aws/README.md), create the non-bypass `trishul_app` role, install the AWS Load Balancer Controller and External Secrets using workload identity, populate the empty runtime secret, and deploy through the VPC-attached CodeBuild project. Attach the regional WAF ACL and ACM certificate to the public edge ALB. PostgreSQL, Valkey, S3, metrics, and the EKS API stay private. CloudFront, Route 53, SES identity, ACM, and DNS authority remain account/domain integration steps.
 
 The shared tier uses one database and bucket with forced RLS and tenant-prefixed objects. The enterprise tier requires separate database, bucket, and KMS resources. The dedicated tier uses the customer-hosted Compose or Kubernetes profile. Moving a tenant between tiers is an operator-controlled export/import, not an in-place toggle.
 
@@ -91,7 +91,11 @@ The shared tier uses one database and bucket with forced RLS and tenant-prefixed
 
 ### Disaster recovery
 
-Restore the newest verified database snapshot and the matching versioned S3 checkpoint into a clean compatible environment, restore KMS/Secrets Manager access, apply migrations, run `scripts/verify_postgres_security.py`, verify the audit chain and object hashes, then expose traffic. DNS failover is manual in this MVP. The Terraform reference is multi-AZ, not multi-region; define customer RPO/RTO and test a full regional rebuild at least twice yearly.
+The primary Terraform mode continuously sends evidence to a KMS-encrypted destination bucket with S3 RTC, replicates RDS automated backups and transaction logs, and replicates the runtime Secrets Manager secret. A destination-region readiness build measures the real RDS recovery-point age every 15 minutes. These implement a one-hour RPO target; they do not prove it until a timed drill passes.
+
+For a quarterly sandbox drill, record the start time, copy `recovery.backend.hcl.example` and `recovery.tfvars.example`, fill their non-secret identifiers from the primary Terraform outputs, and initialize a separate Terraform data directory and backend key. Apply `deployment_mode=recovery`; it reuses the replica bucket, restores RDS to the latest replicated point, and creates regional EKS, Valkey, and CodeBuild only for the drill. Sync the replicated runtime secret through External Secrets, configure the protected GitHub environment with the recovery CodeBuild outputs and `TRISHUL_AWS_REGION=<dr_region>`, and deploy the exact tested commit.
+
+Before declaring recovery ready, verify application health, run `scripts/verify_postgres_security.py`, run `verify_audit --checkpoint` with a security-account checkpoint, compare the backup manifest to replicated objects, and record RDS/S3 recovery-point age and elapsed time. A drill uses a temporary hostname and may be destroyed after evidence is retained. An incident additionally makes the primary read-only before manual DNS cutover. Do not return traffic to the old primary after writes begin in recovery; automated failback is absent, so preserve DR and rebuild/fail back through a separately reviewed reverse copy.
 
 ### Key rotation
 
@@ -126,10 +130,10 @@ For rollback, stop new traffic and workers, retain all data, and redeploy the pr
 ## Known gaps by severity
 
 - **Critical:** none known after the implemented isolation and integrity checks; production onboarding still requires an independent security review.
-- **High:** the AWS foundation is single-region; private EKS endpoint enforcement and enterprise/dedicated tenant provisioning are not automated; audit checkpoints require an external immutable destination operated outside this trust boundary.
+- **High:** enterprise/dedicated tenant provisioning is not automated, and the one-hour RPO/four-hour RTO remain targets until a timed recovery drill succeeds.
 - **Medium:** no live cloud drift connectors, GitHub App/Check Run, presigned large-artifact upload, OSCAL Catalogue/Profile import, complete SSP/POA&M generation, or approval-gated remediation execution; SaaS domain metrics are currently derived rather than native counters.
 - **Low:** CloudFront, Route 53, SES/ACM setup, tenant tier migration, and deletion orchestration are documented operator procedures rather than one-command workflows.
 
-The recommended next phase is the high-priority isolation/DR work: automate enterprise database/bucket/KMS provisioning, private EKS access, external immutable audit checkpoints, and a tested cross-region restore. Commercial billing, complete TPRM campaigns/vendor portal, full policy authoring, OCR, and vector search remain explicitly out of scope.
+The recommended next phase is a timed cross-region drill followed by customer-driven enterprise database/bucket/KMS provisioning. Commercial billing, complete TPRM campaigns/vendor portal, full policy authoring, OCR, and vector search remain explicitly out of scope.
 
 The later Kubernetes/OpenShift profile, including installation and recovery contracts, is documented in [enterprise deployment](enterprise-deployment.md). Compose remains the supported MVP profile.

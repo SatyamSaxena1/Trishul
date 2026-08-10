@@ -22,6 +22,7 @@ from deployment_assurance.models import (
     PolicyRule,
 )
 from deployment_assurance.resources import sha256_hex
+from workflow.models import WorkflowTransition
 
 from .conftest import terraform_plan
 
@@ -56,8 +57,12 @@ def test_open_admin_port_blocks_deployment(target, submit, run_evaluation):
 
     with tenant_context(target.tenant_id):
         failure = ControlResult.objects.get(evaluation_run=run, outcome=Outcome.FAIL, reason_code="PUBLIC_ADMIN_PORT")
+        events = list(
+            WorkflowTransition.objects.filter(entity_id=run.id).values_list("event", flat=True)
+        )
     assert failure.blocking is True
     assert failure.severity == 5
+    assert events == ["start", "evaluate", "decide", "complete"]
 
 
 def test_clean_plan_is_approved(make_target, submit, run_evaluation):

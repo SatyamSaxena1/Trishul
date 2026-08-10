@@ -3,14 +3,22 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  name = "trishul-${var.environment}"
-  azs  = slice(data.aws_availability_zones.available.names, 0, 2)
+  name       = "trishul-${var.environment}"
+  is_primary = var.deployment_mode == "primary"
+  iam_suffix = local.is_primary ? "" : "-${var.aws_region}"
+  azs        = slice(data.aws_availability_zones.available.names, 0, 2)
   public_subnets = {
     for index, az in local.azs : az => cidrsubnet(var.vpc_cidr, 8, index)
   }
   private_subnets = {
     for index, az in local.azs : az => cidrsubnet(var.vpc_cidr, 8, index + 10)
   }
+  evidence_bucket_id         = local.is_primary ? aws_s3_bucket.evidence[0].id : data.aws_s3_bucket.recovery[0].id
+  evidence_bucket_arn        = local.is_primary ? aws_s3_bucket.evidence[0].arn : data.aws_s3_bucket.recovery[0].arn
+  evidence_kms_key_arn       = local.is_primary ? aws_kms_key.data.arn : var.recovery_evidence_kms_key_arn
+  runtime_secret_arn         = local.is_primary ? aws_secretsmanager_secret.runtime[0].arn : data.aws_secretsmanager_secret.recovery[0].arn
+  runtime_secret_name        = var.recovery_runtime_secret_name != "" ? var.recovery_runtime_secret_name : "${local.name}/runtime"
+  checkpoint_writer_role_arn = local.is_primary ? aws_iam_role.checkpoint_writer[0].arn : data.aws_iam_role.checkpoint_writer[0].arn
 }
 
 resource "aws_vpc" "main" {
@@ -107,11 +115,18 @@ resource "aws_kms_alias" "data" {
 }
 
 resource "aws_s3_bucket" "evidence" {
+  count         = local.is_primary ? 1 : 0
   bucket_prefix = "${local.name}-evidence-"
 }
 
+data "aws_s3_bucket" "recovery" {
+  count  = local.is_primary ? 0 : 1
+  bucket = var.recovery_evidence_bucket_name
+}
+
 resource "aws_s3_bucket_public_access_block" "evidence" {
-  bucket                  = aws_s3_bucket.evidence.id
+  count                   = local.is_primary ? 1 : 0
+  bucket                  = aws_s3_bucket.evidence[0].id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -119,12 +134,14 @@ resource "aws_s3_bucket_public_access_block" "evidence" {
 }
 
 resource "aws_s3_bucket_versioning" "evidence" {
-  bucket = aws_s3_bucket.evidence.id
+  count  = local.is_primary ? 1 : 0
+  bucket = aws_s3_bucket.evidence[0].id
   versioning_configuration { status = "Enabled" }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "evidence" {
-  bucket = aws_s3_bucket.evidence.id
+  count  = local.is_primary ? 1 : 0
+  bucket = aws_s3_bucket.evidence[0].id
   rule {
     apply_server_side_encryption_by_default {
       kms_master_key_id = aws_kms_key.data.arn
@@ -135,7 +152,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "evidence" {
 }
 
 resource "aws_s3_bucket_policy" "evidence" {
-  bucket = aws_s3_bucket.evidence.id
+  count  = local.is_primary ? 1 : 0
+  bucket = aws_s3_bucket.evidence[0].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -143,17 +161,27 @@ resource "aws_s3_bucket_policy" "evidence" {
       Effect    = "Deny"
       Principal = "*"
       Action    = "s3:*"
-      Resource  = [aws_s3_bucket.evidence.arn, "${aws_s3_bucket.evidence.arn}/*"]
+      Resource  = [aws_s3_bucket.evidence[0].arn, "${aws_s3_bucket.evidence[0].arn}/*"]
       Condition = { Bool = { "aws:SecureTransport" = "false" } }
     }]
   })
 }
 
 resource "aws_secretsmanager_secret" "runtime" {
+  count                   = local.is_primary ? 1 : 0
   name                    = "${local.name}/runtime"
   description             = "External Secrets reference; values are populated outside Terraform."
   kms_key_id              = aws_kms_key.data.arn
   recovery_window_in_days = 30
+  replica {
+    kms_key_id = aws_kms_key.dr[0].arn
+    region     = var.dr_region
+  }
+}
+
+data "aws_secretsmanager_secret" "recovery" {
+  count = local.is_primary ? 0 : 1
+  name  = local.runtime_secret_name
 }
 
 resource "aws_security_group" "database" {
@@ -197,27 +225,35 @@ resource "aws_db_subnet_group" "main" {
 
 resource "aws_db_instance" "postgres" {
   identifier                      = "${local.name}-postgres"
-  engine                          = "postgres"
-  engine_version                  = "17"
+  engine                          = local.is_primary ? "postgres" : null
+  engine_version                  = local.is_primary ? "17" : null
   instance_class                  = "db.t4g.medium"
   allocated_storage               = 100
   max_allocated_storage           = 500
   storage_type                    = "gp3"
   storage_encrypted               = true
   kms_key_id                      = aws_kms_key.data.arn
-  db_name                         = var.database_name
-  username                        = "trishul_owner"
-  manage_master_user_password     = true
-  master_user_secret_kms_key_id   = aws_kms_key.data.key_id
+  db_name                         = local.is_primary ? var.database_name : null
+  username                        = local.is_primary ? "trishul_owner" : null
+  manage_master_user_password     = local.is_primary ? true : null
+  master_user_secret_kms_key_id   = local.is_primary ? aws_kms_key.data.key_id : null
   multi_az                        = true
   publicly_accessible             = false
   db_subnet_group_name            = aws_db_subnet_group.main.name
   vpc_security_group_ids          = [aws_security_group.database.id]
   backup_retention_period         = 14
   deletion_protection             = var.database_deletion_protection
-  skip_final_snapshot             = false
-  final_snapshot_identifier       = "${local.name}-final"
+  skip_final_snapshot             = local.is_primary ? false : var.recovery_drill
+  final_snapshot_identifier       = !local.is_primary && var.recovery_drill ? null : "${local.name}-final"
   enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+
+  dynamic "restore_to_point_in_time" {
+    for_each = local.is_primary ? [] : [1]
+    content {
+      source_db_instance_automated_backups_arn = var.recovery_db_automated_backups_arn
+      use_latest_restorable_time               = true
+    }
+  }
 }
 
 resource "aws_elasticache_subnet_group" "main" {
@@ -236,7 +272,7 @@ resource "aws_elasticache_serverless_cache" "redis" {
 }
 
 resource "aws_iam_role" "eks_cluster" {
-  name               = "${local.name}-eks-cluster"
+  name               = "${local.name}-eks-cluster${local.iam_suffix}"
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "eks.amazonaws.com" }, Action = "sts:AssumeRole" }] })
 }
 
@@ -275,14 +311,14 @@ resource "aws_eks_cluster" "main" {
   vpc_config {
     subnet_ids              = concat(values(aws_subnet.private)[*].id, values(aws_subnet.public)[*].id)
     endpoint_private_access = true
-    endpoint_public_access  = true
+    endpoint_public_access  = var.eks_public_endpoint_enabled
     security_group_ids      = [aws_security_group.eks_nodes.id]
   }
   depends_on = [aws_iam_role_policy_attachment.eks_cluster]
 }
 
 resource "aws_iam_role" "eks_nodes" {
-  name               = "${local.name}-eks-nodes"
+  name               = "${local.name}-eks-nodes${local.iam_suffix}"
   assume_role_policy = jsonencode({ Version = "2012-10-17", Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }] })
 }
 

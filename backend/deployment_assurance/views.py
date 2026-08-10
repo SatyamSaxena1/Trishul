@@ -25,6 +25,9 @@ from rest_framework.response import Response
 from core.entitlements import EntitlementDenied, enforce, record_usage
 from core.models import AuditEvent
 from core.security import ServicePrincipal, has_permission, resolve_tenant
+from workflow.engine import InvalidTransition, StaleTransition, transition
+from workflow.machines import EVALUATION
+from workflow.models import WorkflowTransition
 
 from . import decisions
 from . import permissions as perms
@@ -71,6 +74,12 @@ class PayloadTooLarge(exceptions.APIException):
     status_code = 413
     default_detail = "The submitted artifact exceeds the permitted size."
     default_code = "artifact_too_large"
+
+
+class TransitionConflict(exceptions.APIException):
+    status_code = 409
+    default_detail = "The requested lifecycle transition is not available."
+    default_code = "invalid_transition"
 
 
 class AssuranceViewSet(viewsets.ModelViewSet):
@@ -401,7 +410,89 @@ class EvaluationRunViewSet(ReadOnlyAssuranceViewSet):
     model = EvaluationRun
     read_permission = perms.EVALUATION_READ
     application_path = "target__application_id"
-    action_permissions = {"decision": perms.DECISION_READ, "oscal_results": perms.DECISION_READ}
+    http_method_names = ["get", "post", "head", "options"]
+    action_permissions = {
+        "create": perms.EVALUATION_CREATE,
+        "decision": perms.DECISION_READ,
+        "oscal_results": perms.DECISION_READ,
+        "available_transitions": perms.EVALUATION_READ,
+        "timeline": perms.EVALUATION_READ,
+        "transition": perms.EVALUATION_CREATE,
+    }
+
+    def create(self, request, *args, **kwargs):
+        raise exceptions.MethodNotAllowed("POST", "Create evaluations from a finalized snapshot.")
+
+    @action(detail=True, methods=["get"], url_path="available-transitions")
+    def available_transitions(self, request, pk=None):
+        run = self.get_object()
+        events = [event for event in EVALUATION.available_events(run.state) if event == "cancel"]
+        return Response({"state": run.state, "version": run.version, "events": events})
+
+    @action(detail=True, methods=["post"])
+    def transition(self, request, pk=None):
+        run = self.get_object()
+        idempotency_key = request.headers.get("Idempotency-Key", "")
+        if idempotency_key and WorkflowTransition.objects.filter(
+            machine=EVALUATION.name,
+            entity_id=run.id,
+            event="cancel",
+            idempotency_key=idempotency_key,
+        ).exists():
+            run.refresh_from_db()
+            return Response(SERIALIZERS[EvaluationRun](run).data)
+        self._match_version(run)
+        if request.data.get("event") != "cancel":
+            raise TransitionConflict()
+
+        def cancelled(entity):
+            entity.completed_at = timezone.now()
+            entity.lease_expires_at = None
+            return ("completed_at", "lease_expires_at")
+
+        actor_type, actor_id = self._actor()
+        try:
+            result = transition(
+                model=EvaluationRun,
+                entity_id=run.id,
+                machine=EVALUATION,
+                event="cancel",
+                tenant=request.tenant,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                actor_tenant=request.tenant,
+                expected_version=run.version,
+                reason=str(request.data.get("reason", "")).strip(),
+                idempotency_key=idempotency_key,
+                mutate=cancelled,
+            )
+        except StaleTransition as exc:
+            raise PreconditionFailed() from exc
+        except InvalidTransition as exc:
+            raise TransitionConflict() from exc
+        return Response(SERIALIZERS[EvaluationRun](result.entity).data)
+
+    @action(detail=True, methods=["get"])
+    def timeline(self, request, pk=None):
+        run = self.get_object()
+        rows = WorkflowTransition.objects.filter(machine=EVALUATION.name, entity_id=run.id)
+        return Response(
+            [
+                {
+                    "id": row.id,
+                    "event": row.event,
+                    "from_state": row.from_state,
+                    "to_state": row.to_state,
+                    "actor_type": row.actor_type,
+                    "actor_id": row.actor_id,
+                    "reason_code": row.reason_code,
+                    "machine_version": row.machine_version,
+                    "entity_version": row.entity_version_after,
+                    "occurred_at": row.created_at,
+                }
+                for row in rows
+            ]
+        )
 
     @action(detail=True, methods=["get"])
     def results(self, request, pk=None):

@@ -1,0 +1,39 @@
+name: Deploy AWS pilot
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          aws-region: ${{ vars.TRISHUL_AWS_REGION || 'ap-south-1' }}
+          role-to-assume: ${{ vars.TRISHUL_AWS_DEPLOY_ROLE_ARN }}
+      - name: Start private deployment job
+        id: build
+        env:
+          PROJECT: ${{ vars.TRISHUL_AWS_CODEBUILD_PROJECT }}
+        run: |
+          build_id=$(aws codebuild start-build --project-name "$PROJECT" --source-version "$GITHUB_SHA" --query 'build.id' --output text)
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+      - name: Wait for deployment
+        env:
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
+        run: |
+          for attempt in $(seq 1 120); do
+            status=$(aws codebuild batch-get-builds --ids "$BUILD_ID" --query 'builds[0].buildStatus' --output text)
+            case "$status" in
+              SUCCEEDED) exit 0 ;;
+              FAILED|FAULT|STOPPED|TIMED_OUT) echo "CodeBuild ended with $status"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "CodeBuild did not finish within 20 minutes"
+          exit 1

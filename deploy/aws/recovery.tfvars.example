@@ -1,0 +1,15 @@
+deployment_mode                   = "recovery"
+recovery_drill                    = true
+aws_region                        = "ap-southeast-1"
+dr_region                         = "ap-southeast-1"
+vpc_cidr                          = "10.50.0.0/16"
+recovery_evidence_bucket_name     = "replace-with-primary-output-dr-evidence-bucket"
+recovery_evidence_kms_key_arn     = "arn:aws:kms:ap-southeast-1:123456789012:key/00000000-0000-0000-0000-000000000000"
+recovery_db_automated_backups_arn = "arn:aws:rds:ap-southeast-1:123456789012:auto-backup:ab-replace"
+database_deletion_protection      = false
+
+github_repository               = "example/trishul"
+github_oidc_provider_arn        = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+codeconnections_connection_arn = "arn:aws:codeconnections:ap-southeast-1:123456789012:connection/00000000-0000-0000-0000-000000000000"
+security_account_id             = "210987654321"
+audit_checkpoint_bucket_name    = "replace-with-security-account-checkpoint-bucket"

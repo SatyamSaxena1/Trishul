@@ -1,0 +1,6 @@
+github_repository              = "example/trishul"
+github_oidc_provider_arn       = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+codeconnections_connection_arn = "arn:aws:codeconnections:ap-south-1:123456789012:connection/00000000-0000-0000-0000-000000000000"
+alert_email                    = "operations@example.com"
+security_account_id             = "210987654321"
+audit_checkpoint_bucket_name    = "replace-with-security-account-checkpoint-bucket"

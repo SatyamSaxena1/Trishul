@@ -17,6 +17,8 @@ from core.models import (
     Task,
 )
 from core.risk import FORMULA_VERSION
+from workflow.engine import transition
+from workflow.machines import CONTROL
 
 from .decisions import TargetProfile, score_result
 from .models import ControlResult, Outcome
@@ -109,10 +111,7 @@ def synchronize(*, tenant, target, results, manifest_evidence):
             if locked:
                 _notify_locked_change(tenant, locked, organisation_control, gap, risk)
             elif organisation_control.status == OrganisationControl.Status.NOT_STARTED:
-                OrganisationControl.all_objects.filter(pk=organisation_control.pk).update(
-                    status=OrganisationControl.Status.EVIDENCE_SUBMITTED,
-                    version=organisation_control.version + 1,
-                )
+                _submit_evidence(tenant, organisation_control)
         elif result.outcome == Outcome.PASS:
             gap = ComplianceGap.all_objects.filter(tenant=tenant, source_fingerprint=issue_key, status="open").first()
             if gap and locked:
@@ -120,10 +119,22 @@ def synchronize(*, tenant, target, results, manifest_evidence):
             elif gap:
                 _close_gap(tenant, gap)
             if not locked:
-                OrganisationControl.all_objects.filter(pk=organisation_control.pk).update(
-                    status=OrganisationControl.Status.EVIDENCE_SUBMITTED,
-                    version=organisation_control.version + 1,
-                )
+                _submit_evidence(tenant, organisation_control)
+
+
+def _submit_evidence(tenant, control):
+    if "submit_evidence" not in CONTROL.available_events(control.status):
+        return
+    transition(
+        model=OrganisationControl,
+        entity_id=control.id,
+        machine=CONTROL,
+        event="submit_evidence",
+        tenant=tenant,
+        actor_type="system",
+        actor_id="deployment-assurance",
+        expected_version=control.version,
+    )
 
 
 def _issue_key(target, result):
