@@ -154,6 +154,17 @@ class EvidenceSerializer(TenantModelSerializer):
             "evidence_version",
             "status",
             "supersedes",
+            "media_type",
+            "extracted_attributes",
+            "extraction_provenance",
+            "extraction_confidence",
+            "quality_score",
+            "quality_breakdown",
+            "quality_reasons",
+            "quality_suggestions",
+            "quality_threshold",
+            "quality_passed",
+            "quality_profile_version",
         )
 
     def get_status(self, obj):

@@ -1,6 +1,6 @@
 # Concept-note requirements traceability
 
-Baseline: `main` at `42824d9` on 10 August 2026, plus the active assessment-scoring slice.
+Baseline: `main` at `fc52d2d` on 10 August 2026, plus the active evidence-intelligence slice.
 
 Status is deliberately conservative: **implemented** means a usable, tested path;
 **partial** means a schema, API, or narrow path exists; **planned** means no
@@ -14,7 +14,7 @@ the GRC/TPRM programme, not a compliance attestation.
 | M1 tenancy, identity and onboarding | Partial | Tenant/RLS/membership/engagement models and OIDC | SAML, SCIM, tenant IdP configuration, session controls, full persona journeys |
 | M2 UCF and mappings | Partial | Versioned framework, requirement, UCO, mapping and delta models | Expert-approved ISO and DPDP packs, pack review/diff and instantiation |
 | M3 scope and assets | Partial | Organisation, workspace and application records | Entities, locations, assets, ownership and applicability wizard |
-| M4 evidence | Partial | Immutable evidence records, hashed upload, append-only supersession API and object storage | Extraction, classification, attributes, quality and version propagation |
+| M4 evidence | Partial | Immutable evidence records, hashed upload, native text attribute extraction, explainable quality metadata and append-only supersession | PDF/OCR adapter, classification refinement, override gate and version propagation |
 | M5 evidence intelligence and reuse | Planned | AI gateway/run records only | Retrieval, freshness/scope/sufficiency, cited proposal and human approval |
 | M6 scoring | Partial | Risk scores and limited status counts | Configurable scores, caps, snapshots, drill-down and trends |
 | M7 policy lifecycle | Planned | Deployment policy packs are not GRC policies | Authoring, approval, publication, attestation and expiry |
@@ -43,7 +43,7 @@ the GRC/TPRM programme, not a compliance attestation.
 | BR-62 | AI decisions preserve provider/model/prompt/sources/confidence. | Partial | Immutable AI-run schema with citation and prompt tests. |
 | BR-63 | Critical non-compliance caps framework score. | Planned | Configurable score/cap test suite. |
 | BR-64 | Not Applicable requires justification and is excluded from scoring. | Implemented | Model/API justification guards, human-review enforcement and score-exclusion test. |
-| BR-65 | Below-threshold evidence requires a justified override. | Planned | Quality threshold and override audit test. |
+| BR-65 | Below-threshold evidence requires a justified override. | Partial | Configurable threshold and immutable pass/fail result exist; add justified override and submission gate. |
 | BR-66 | Evidence uploader cannot verdict the same control. | Partial | Cross-identity verdict denial test. |
 | BR-67 | Overdue policies reduce supported-control maturity. | Planned | Policy expiry scheduler and maturity recalculation test. |
 | BR-68 | Unevidenced vendor claims receive reduced score credit. | Planned | Vendor scoring test. |
