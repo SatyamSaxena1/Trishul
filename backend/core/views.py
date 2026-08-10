@@ -93,6 +93,8 @@ from .serializers import (
     AuditFirmOnboardingSerializer,
     AuditorVerdictRequestSerializer,
     EvidenceReplacementSerializer,
+    EvidenceReplacementUploadSerializer,
+    EvidenceUploadSerializer,
     TenantSummarySerializer,
 )
 from .storage import healthcheck as storage_healthcheck
@@ -375,21 +377,57 @@ class ServiceAccountViewSet(viewset_for(ServiceAccount)):
 
 
 class EvidenceViewSet(viewset_for(Evidence, immutable=True)):
+    def _save_upload(self, serializer, *, previous=None):
+        values = dict(serializer.validated_data)
+        uploaded = values.pop("file")
+        assessment = previous.assessment if previous else values.pop("assessment")
+        digest = hashlib.sha256()
+        for chunk in uploaded.chunks():
+            digest.update(chunk)
+        uploaded.seek(0)
+        evidence_id = uuid.uuid4()
+        object_key = f"{self.request.tenant.id}/evidence/{assessment.id}/{evidence_id}/{digest.hexdigest()}"
+        put_file(object_key, uploaded, content_type=uploaded.content_type or "application/octet-stream")
+        return Evidence.objects.create(
+            id=evidence_id,
+            tenant=self.request.tenant,
+            assessment=assessment,
+            object_key=object_key,
+            sha256=digest.hexdigest(),
+            evidence_version=previous.evidence_version + 1 if previous else 1,
+            supersedes=previous,
+            **values,
+        )
+
+    @action(detail=False, methods=["post"], url_path="uploads")
+    def upload(self, request):
+        serializer = EvidenceUploadSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            evidence = self._save_upload(serializer)
+            self._audit("uploaded", evidence)
+        return Response(self.get_serializer(evidence).data, status=status.HTTP_201_CREATED)
+
     @action(detail=True, methods=["post"])
     def supersede(self, request, pk=None):
         previous = self.get_object()
-        replacement = EvidenceReplacementSerializer(data=request.data)
+        upload = "file" in request.FILES
+        serializer_class = EvidenceReplacementUploadSerializer if upload else EvidenceReplacementSerializer
+        replacement = serializer_class(data=request.data)
         replacement.is_valid(raise_exception=True)
         with transaction.atomic():
             previous = Evidence.objects.select_for_update().get(pk=previous.pk)
             if Evidence.objects.filter(supersedes=previous).exists():
                 raise exceptions.ValidationError("Evidence has already been superseded.")
-            current = replacement.save(
-                tenant=request.tenant,
-                assessment=previous.assessment,
-                evidence_version=previous.evidence_version + 1,
-                supersedes=previous,
-            )
+            if upload:
+                current = self._save_upload(replacement, previous=previous)
+            else:
+                current = replacement.save(
+                    tenant=request.tenant,
+                    assessment=previous.assessment,
+                    evidence_version=previous.evidence_version + 1,
+                    supersedes=previous,
+                )
             self._audit("superseded", current)
         return Response(self.get_serializer(current).data, status=status.HTTP_201_CREATED)
 

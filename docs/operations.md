@@ -89,14 +89,15 @@ The shared tier uses one database and bucket with forced RLS and tenant-prefixed
 
 ### Evidence versions
 
-Create the initial evidence record with `POST /api/v1/evidence/`. Create a replacement with
-`POST /api/v1/evidence/{id}/supersede/`; the server fixes the assessment, successor link and next
-version number. Evidence lifecycle fields supplied by a client are ignored, and existing records
-cannot be updated or deleted. Each replacement must reference a different immutable object key.
+Upload initial evidence as multipart form data to `POST /api/v1/evidence/uploads/`. The server
+computes SHA-256 and writes to a generated tenant/assessment/evidence key before creating the
+record. Upload a replacement to `POST /api/v1/evidence/{id}/supersede/`; the server fixes the
+assessment, successor link and next version number. Connectors may use `POST /api/v1/evidence/`
+to register an object they already wrote to a tenant-prefixed, non-overwriting key.
 
-These endpoints register object references; they do not upload bytes. Until the safe-upload slice
-lands, operators and connectors must write a tenant-prefixed, non-overwriting object before
-registering it and must rely on bucket versioning and retention controls.
+Evidence lifecycle fields supplied by a client are ignored, existing records cannot be updated or
+deleted, and every uploaded replacement receives a new object key. Bucket versioning and retention
+remain defence in depth.
 
 ## SaaS runbooks
 

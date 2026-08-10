@@ -70,6 +70,12 @@ def verify(owner_dsn, app_dsn):
     except psycopg.errors.RaiseException:
         pass
 
+    with psycopg.connect(owner_dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM pg_trigger WHERE tgname = 'core_evidence_immutable' AND NOT tgisinternal"
+        )
+        assert cursor.fetchone()[0] == 1, "Evidence immutability trigger is missing"
+
 
 def verify_workflow(owner_dsn, app_dsn):
     """Workflow history is tenant-isolated and immutable for every database role."""

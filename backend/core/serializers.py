@@ -159,11 +159,34 @@ class EvidenceSerializer(TenantModelSerializer):
     def get_status(self, obj):
         return "superseded" if obj.superseded_by.exists() else "current"
 
+    def validate_object_key(self, value):
+        if not value.startswith(f"{current_tenant_id()}/"):
+            raise serializers.ValidationError("Evidence object keys must use the active tenant prefix.")
+        return value
+
 
 class EvidenceReplacementSerializer(TenantModelSerializer):
     class Meta:
         model = Evidence
         fields = ("title", "source", "evidence_date", "object_key", "sha256", "classification")
+
+    def validate_object_key(self, value):
+        if not value.startswith(f"{current_tenant_id()}/"):
+            raise serializers.ValidationError("Evidence object keys must use the active tenant prefix.")
+        return value
+
+
+class EvidenceUploadSerializer(TenantModelSerializer):
+    file = serializers.FileField(write_only=True)
+
+    class Meta:
+        model = Evidence
+        fields = ("assessment", "title", "source", "evidence_date", "classification", "file")
+
+
+class EvidenceReplacementUploadSerializer(EvidenceUploadSerializer):
+    class Meta(EvidenceUploadSerializer.Meta):
+        fields = ("title", "source", "evidence_date", "classification", "file")
 
 
 ComplianceGapSerializer = serializer_for(ComplianceGap)
