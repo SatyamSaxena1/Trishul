@@ -47,6 +47,8 @@ from .models import (
     RiskLink,
     RiskScore,
     Scan,
+    ScimCredential,
+    ScimIdentity,
     ServiceAccount,
     SubscriptionPlan,
     Task,
@@ -117,8 +119,13 @@ IdentityProviderConfigurationSerializer = serializer_for(IdentityProviderConfigu
 IdentityProviderConfigurationSerializer.Meta.extra_kwargs = {"secret_reference": {"write_only": True}}
 TenantSessionPolicySerializer = serializer_for(TenantSessionPolicy)
 TenantInvitationSerializer = serializer_for(
-    TenantInvitation, read_only_fields=("target_tenant", "invited_by", "accepted_at")
+    TenantInvitation,
+    read_only_fields=("target_tenant", "invited_by", "accepted_at", "revoked_at", "token_hash"),
 )
+ScimCredentialSerializer = serializer_for(
+    ScimCredential, read_only_fields=("token_hash", "last_used_at", "revoked_at")
+)
+ScimIdentitySerializer = serializer_for(ScimIdentity)
 EngagementSerializer = serializer_for(Engagement, read_only_fields=("status", "created_by", "approved_by"))
 EngagementScopeSerializer = serializer_for(EngagementScope)
 EngagementMemberSerializer = serializer_for(EngagementMember)
@@ -355,6 +362,8 @@ SERIALIZERS = {
     IdentityProviderConfiguration: IdentityProviderConfigurationSerializer,
     TenantSessionPolicy: TenantSessionPolicySerializer,
     TenantInvitation: TenantInvitationSerializer,
+    ScimCredential: ScimCredentialSerializer,
+    ScimIdentity: ScimIdentitySerializer,
     Engagement: EngagementSerializer,
     EngagementScope: EngagementScopeSerializer,
     EngagementMember: EngagementMemberSerializer,

@@ -11,7 +11,7 @@ the GRC/TPRM programme, not a compliance attestation.
 
 | Requirement group | Status | Evidence | Required completion slice |
 | --- | --- | --- | --- |
-| M1 tenancy, identity and onboarding | Partial | Tenant/RLS/membership/engagement models, tenant OIDC/SAML configuration boundary, tenant-bound OIDC validation and session-policy records | SAML interoperability/ACS, SCIM, enforced session expiry, break-glass, custom roles and full persona journeys |
+| M1 tenancy, identity and onboarding | Partial | Tenant/RLS/membership/engagement models, tenant-bound OIDC validation, one-time invitations, tenant-scoped SCIM Users provisioning and session-policy records | SAML interoperability/ACS, enforced session expiry, break-glass, custom roles and full persona journeys |
 | M2 UCF and mappings | Partial | Versioned framework, requirement, UCO, mapping and delta models | Expert-approved ISO and DPDP packs, pack review/diff and instantiation |
 | M3 scope and assets | Partial | Organisation, workspace and application records | Entities, locations, assets, ownership and applicability wizard |
 | M4 evidence | Partial | Immutable evidence records, hashed upload, native text extraction, quality metadata, justified overrides and independently evaluated successors | PDF/OCR adapter and classification refinement |

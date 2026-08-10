@@ -299,6 +299,42 @@ class TenantInvitation(TenantScopedModel):
     invited_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     expires_at = models.DateTimeField()
     accepted_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+
+    @classmethod
+    def issue(cls, **values):
+        token = secrets.token_urlsafe(32)
+        return cls.objects.create(token_hash=hashlib.sha256(token.encode()).hexdigest(), **values), token
+
+
+class ScimCredential(TenantScopedModel):
+    name = models.CharField(max_length=120)
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    default_role = models.CharField(max_length=30, choices=Membership.Role.choices)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    @classmethod
+    def issue(cls, **values):
+        token = secrets.token_urlsafe(32)
+        return cls.objects.create(token_hash=hashlib.sha256(token.encode()).hexdigest(), **values), token
+
+
+class ScimIdentity(TenantScopedModel):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    external_id = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "user"], name="scim_identity_tenant_user_uniq"),
+            models.UniqueConstraint(
+                fields=["tenant", "external_id"],
+                condition=models.Q(external_id__gt=""),
+                name="scim_identity_tenant_external_uniq",
+            ),
+        ]
 
 
 class Engagement(TenantScopedModel):
