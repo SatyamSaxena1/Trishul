@@ -17,6 +17,7 @@ from .models import (
     AuditEvent,
     AuthSession,
     BreakGlassGrant,
+    CrossTenantAccessEvent,
     IdentityProviderConfiguration,
     Membership,
     ServiceAccount,
@@ -37,6 +38,13 @@ BREAK_GLASS_PERMISSIONS = {
     "audit.read",
 }
 
+# AUTHORIZATION_AUDIT_BRIDGE: seeded/default atomic permissions for built-in
+# roles, not an authorization engine in its own right. membership_permissions()
+# below is the single canonical composer -- it unions a membership's built-in
+# role grant (this dict), its extra_permissions, and an active CustomRole's
+# atomic permissions into one effective set. Every check goes through
+# core.authorization, which resolves permissions via that one function.
+# Keep this dict as data; add new logic to membership_permissions(), not here.
 ROLE_PERMISSIONS = {
     "admin": {"*"},
     "platform_admin": {
@@ -47,6 +55,7 @@ ROLE_PERMISSIONS = {
         "usage.read",
         "audit.read",
     },
+    "framework_content_manager": {"tenant.read", "assessment.read", "assessment.write", "audit.read"},
     "firm_admin": {
         "tenant.manage",
         "membership.manage",
@@ -67,6 +76,7 @@ ROLE_PERMISSIONS = {
         "usage.read",
         "audit.read",
     },
+    "lead_auditor": {"engagement.read", "engagement.review", "engagement.verdict", "audit.read"},
     "reviewer": {"engagement.read", "engagement.review", "audit.read"},
     "org_admin": {
         "tenant.manage",
@@ -96,6 +106,7 @@ ROLE_PERMISSIONS = {
     "control_owner": {"control.assigned", "evidence.assigned", "task.assigned"},
     "risk_owner": {"risk.read", "risk.accept", "task.read", "task.manage"},
     "vendor_manager": {"vendor.manage", "risk.read", "evidence.read", "task.read", "task.manage"},
+    "policy_approver": {"policy.read", "policy.approve", "control.read", "audit.read"},
     "ciso": {
         "application.read",
         "control.read",
@@ -183,6 +194,32 @@ def _extend_role_permissions():
 
 
 _extend_role_permissions()
+
+RESERVED_PERMISSIONS = {"*", "platform.manage"}
+DELEGABLE_PERMISSIONS = {
+    permission
+    for permissions in ROLE_PERMISSIONS.values()
+    for permission in permissions
+    if permission not in RESERVED_PERMISSIONS
+    and not permission.startswith(("engagement.verdict", "audit.export", "service_account."))
+}
+
+
+def permission_catalog(tenant_type):
+    permissions = sorted(
+        {permission for values in ROLE_PERMISSIONS.values() for permission in values if permission != "*"}
+    )
+    return [
+        {
+            "code": code,
+            "category": code.split(".", 1)[0],
+            "delegable": code in DELEGABLE_PERMISSIONS,
+            "privileged": code not in DELEGABLE_PERMISSIONS,
+            "tenant_types": [tenant_type] if code in DELEGABLE_PERMISSIONS else [],
+        }
+        for code in permissions
+        if code != "platform.manage" or tenant_type == "platform"
+    ]
 
 
 @dataclass
@@ -435,7 +472,7 @@ def resolve_tenant(request):
             return grant.tenant
         memberships = Membership.all_objects.filter(
             user=request.user, is_active=True, tenant__is_active=True
-        ).select_related("tenant")
+        ).select_related("tenant", "custom_role")
         if requested:
             try:
                 tenant_id = UUID(requested)
@@ -466,13 +503,22 @@ def resolve_tenant(request):
     return tenant
 
 
+def membership_permissions(membership) -> set[str]:
+    """Canonical composition of a membership's atomic permissions; the only place this union is computed."""
+    custom = (
+        set(membership.custom_role.permissions)
+        if membership.custom_role and membership.custom_role.is_active
+        else set()
+    )
+    return ROLE_PERMISSIONS.get(membership.role, set()) | set(membership.extra_permissions) | custom
+
+
 def principal_permissions(request) -> set[str]:
     if isinstance(request.user, ServicePrincipal):
         return set(request.user.account.scopes)
     if grant := getattr(request, "break_glass_grant", None):
         return set(grant.scopes)
-    membership = request.membership
-    return ROLE_PERMISSIONS.get(membership.role, set()) | set(membership.extra_permissions)
+    return membership_permissions(request.membership)
 
 
 def has_permission(request, permission: str) -> bool:
@@ -489,6 +535,42 @@ def has_permission(request, permission: str) -> bool:
         else request.membership.application_ids
         )
     return not restrictions or not application_id or str(application_id) in restrictions
+
+
+def record_authorization_decision(
+    request,
+    *,
+    action,
+    resource_type,
+    resource_id="",
+    decision,
+    reason,
+    target_tenant=None,
+    engagement=None,
+    application_id=None,
+    correlation_id="",
+):
+    """§5.3 choke point: every permission decision is logged with subject, object, action, decision and reason.
+
+    application_id and correlation_id are optional: most checks (list views,
+    pre-object-resolution create/update) don't have a concrete application to
+    attribute the decision to, and this project has no request-correlation-id
+    convention yet. Callers pass them only when they're already resolved.
+    """
+    subject_id = str(request.user.account.id) if isinstance(request.user, ServicePrincipal) else str(request.user.id)
+    CrossTenantAccessEvent.all_objects.create(
+        tenant=request.tenant,
+        target_tenant=target_tenant,
+        engagement=engagement,
+        application_id=application_id,
+        correlation_id=correlation_id,
+        subject_id=subject_id,
+        object_type=resource_type,
+        object_id=str(resource_id),
+        action=action,
+        decision=decision,
+        reason=reason,
+    )
 
 
 class TenantContextCleanupMiddleware:

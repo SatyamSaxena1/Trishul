@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models, transaction
+from django.db import connection, models, transaction
 from django.utils import timezone
 
 from .tenancy import current_tenant_id
@@ -122,6 +122,15 @@ class Application(TenantScopedModel):
         ]
 
 
+class CustomRole(TenantScopedModel):
+    name = models.CharField(max_length=120)
+    permissions = models.JSONField(default=list)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "name"], name="custom_role_tenant_name_uniq")]
+
+
 class Membership(TenantScopedModel):
     class Role(models.TextChoices):
         ADMIN = "admin", "Organization administrator"
@@ -134,17 +143,21 @@ class Membership(TenantScopedModel):
         AUDITOR = "auditor", "Auditor"
         EXECUTIVE = "executive", "Executive"
         PLATFORM_ADMIN = "platform_admin", "Platform administrator"
+        FRAMEWORK_CONTENT_MANAGER = "framework_content_manager", "Framework content manager"
         FIRM_ADMIN = "firm_admin", "Audit firm administrator"
         AUDIT_MANAGER = "audit_manager", "Audit manager"
+        LEAD_AUDITOR = "lead_auditor", "Lead auditor"
         REVIEWER = "reviewer", "Reviewer / QA"
         ORG_ADMIN = "org_admin", "Auditee administrator"
         COMPLIANCE_MANAGER = "compliance_manager", "Compliance manager"
         CONTROL_OWNER = "control_owner", "Control owner"
         RISK_OWNER = "risk_owner", "Risk owner"
         VENDOR_MANAGER = "vendor_manager", "Vendor manager"
+        POLICY_APPROVER = "policy_approver", "Policy approver"
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
-    role = models.CharField(max_length=20, choices=Role.choices)
+    role = models.CharField(max_length=30, choices=Role.choices)
+    custom_role = models.ForeignKey(CustomRole, on_delete=models.PROTECT, null=True, blank=True)
     extra_permissions = models.JSONField(default=list, blank=True)
     application_ids = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
@@ -354,7 +367,7 @@ class TenantInvitation(TenantScopedModel):
 
     @classmethod
     def issue(cls, **values):
-        token = secrets.token_urlsafe(32)
+        token = f"{values['tenant'].id}.{secrets.token_urlsafe(32)}"
         return cls.objects.create(token_hash=hashlib.sha256(token.encode()).hexdigest(), **values), token
 
 
@@ -490,16 +503,26 @@ class EngagementStatusHistory(ImmutableTenantRecord):
 
 
 class CrossTenantAccessEvent(ImmutableTenantRecord):
+    """The canonical authorization-decision audit row (§5.3): every ALLOW/DENY
+    from core.authorization is recorded here, whether or not it crossed a
+    tenant boundary. application_id and correlation_id are populated only
+    where the caller already has them; not every check resolves an
+    application, and this project has no request-correlation-id convention
+    yet (see the AUTHORIZATION_AUDIT_BRIDGE note in core/authorization.py).
+    """
+
     target_tenant = models.ForeignKey(
         Tenant, on_delete=models.PROTECT, null=True, blank=True, related_name="cross_tenant_access_events"
     )
     engagement = models.ForeignKey(Engagement, on_delete=models.PROTECT, null=True, blank=True)
+    application_id = models.UUIDField(null=True, blank=True)
     subject_id = models.CharField(max_length=200)
     object_type = models.CharField(max_length=100)
     object_id = models.CharField(max_length=200, blank=True)
     action = models.CharField(max_length=80)
     decision = models.CharField(max_length=20, choices=[("allow", "Allow"), ("deny", "Deny")])
     reason = models.CharField(max_length=300)
+    correlation_id = models.CharField(max_length=100, blank=True)
     occurred_at = models.DateTimeField(default=timezone.now)
 
 
@@ -534,7 +557,7 @@ class AuditEvent(TenantScopedModel):
     action = models.CharField(max_length=120)
     resource_type = models.CharField(max_length=80)
     resource_id = models.CharField(max_length=200)
-    details = models.JSONField(default=dict)
+    details = models.JSONField(default=dict, blank=True)
     occurred_at = models.DateTimeField(default=timezone.now)
     previous_hash = models.CharField(max_length=64, blank=True)
     event_hash = models.CharField(max_length=64)
@@ -546,7 +569,10 @@ class AuditEvent(TenantScopedModel):
     def append(cls, *, tenant, actor_type, actor_id, action, resource_type, resource_id, details=None):
         details = details or {}
         with transaction.atomic():
-            previous = cls.all_objects.select_for_update().filter(tenant=tenant).order_by("-occurred_at", "-id").first()
+            if connection.vendor == "postgresql":
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", [str(tenant.id)])
+            previous = cls.all_objects.filter(tenant=tenant).order_by("-occurred_at", "-id").first()
             occurred_at = timezone.now()
             previous_hash = previous.event_hash if previous else ""
             payload = json.dumps(

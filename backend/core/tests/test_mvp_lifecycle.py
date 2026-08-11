@@ -1,3 +1,4 @@
+from datetime import date
 from unittest.mock import patch
 
 import pytest
@@ -11,6 +12,7 @@ from core.models import (
     Assessment,
     AuditEvent,
     ComplianceGap,
+    ControlEvidenceLink,
     Engagement,
     Evidence,
     EvidenceReuseEvaluation,
@@ -73,7 +75,34 @@ def test_distinct_personas_complete_the_evidence_to_locked_verdict_loop(_put_fil
         unrelated = OrganisationControl.objects.create(
             tenant=auditee, application=assessment.application, unified_control=unrelated_uco
         )
+        unrelated_evidence = Evidence.objects.create(
+            tenant=auditee,
+            assessment=assessment,
+            title="Unrelated control evidence",
+            source="manual",
+            evidence_date=date.today(),
+            object_key=f"{auditee.id}/evidence/unrelated.txt",
+            sha256="9" * 64,
+            classification="internal",
+        )
+        ControlEvidenceLink.objects.create(
+            tenant=auditee,
+            organisation_control=unrelated,
+            evidence=unrelated_evidence,
+            source_type="manual",
+            source_id=unrelated_evidence.id,
+            source_hash=unrelated_evidence.sha256,
+            verdict="accept",
+            reason="Manual link for the scoped-visibility acceptance check.",
+            mapping_version="1",
+        )
+    # §4.3: a Control Owner assigned only to `control` must not see evidence that
+    # belongs solely to `unrelated`, even though both controls sit in the same
+    # application and assessment.
     assert owner.get(f"/api/v1/organisation-controls/{unrelated.id}/").status_code == 404
+    assert owner.get(f"/api/v1/evidence/{unrelated_evidence.id}/").status_code == 404
+    listed_ids = {item["id"] for item in owner.get("/api/v1/evidence/").data["results"]}
+    assert str(unrelated_evidence.id) not in listed_ids
 
     response = manager.post(
         "/api/v1/assessment-responses/",

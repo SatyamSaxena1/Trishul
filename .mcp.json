@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "graphrepo": {
+      "command": "node",
+      "args": [
+        "c:\\Users\\satya\\.vscode\\extensions\\the-muses-ltd.graphrepo-0.7.0\\dist\\mcp-server.cjs",
+        "serve"
+      ],
+      "env": {
+        "GRAPHREPO_DATA_FILE": "c:\\Users\\satya\\Trishul\\.graphrepo\\graph.json",
+        "GRAPHREPO_REPO_PATH": "c:\\Users\\satya\\Trishul"
+      }
+    }
+  }
+}

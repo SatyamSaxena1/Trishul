@@ -22,6 +22,7 @@ from core.models import (
     Organization,
     Tenant,
     TenantEntitlement,
+    TenantInvitation,
     TenantRelationship,
     TenantSubscription,
     UnifiedControlObjective,
@@ -153,6 +154,68 @@ def test_platform_onboards_an_enforced_audit_firm():
     with tenant_context(firm.id):
         assert TenantSubscription.objects.get().state == TenantSubscription.State.TRIAL
         assert TenantEntitlement.objects.get(code="auditor_seats").limit == 3
+    invitation = TenantInvitation.all_objects.get(target_tenant=firm)
+    assert invitation.token_hash
+    assert response.data["invitation_token"] not in invitation.token_hash
+
+    invited = get_user_model().objects.create(username="firm-admin", email="admin@example.test")
+    invited_client = APIClient()
+    invited_client.force_authenticate(invited)
+    accepted = invited_client.post(f"/api/v1/invitations/{response.data['invitation_token']}/accept")
+    assert accepted.status_code == 200, accepted.data
+    assert Membership.all_objects.get(tenant=firm, user=invited).role == Membership.Role.FIRM_ADMIN
+    assert invited_client.post(f"/api/v1/invitations/{response.data['invitation_token']}/accept").status_code == 400
+
+
+def test_auditee_onboarding_issues_an_acceptable_invitation():
+    firm = Tenant.objects.create(slug="onboard-firm", name="Onboard firm", tenant_type=Tenant.Type.AUDIT_FIRM)
+    manager = member(firm, Membership.Role.AUDIT_MANAGER, "onboard-manager")
+    client = APIClient()
+    client.force_authenticate(manager)
+    client.credentials(HTTP_X_TRISHUL_TENANT=str(firm.id))
+
+    response = client.post(
+        "/api/v1/engagements/onboard-auditee/",
+        {
+            "slug": "onboarded-auditee",
+            "name": "Onboarded Auditee",
+            "administrator_email": "org-admin@example.test",
+            "auditee_mode": "firm_managed",
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.data
+    auditee = Tenant.objects.get(slug="onboarded-auditee")
+    assert auditee.tenant_type == Tenant.Type.AUDITEE
+
+    invitation = TenantInvitation.all_objects.get(target_tenant=auditee)
+    assert invitation.token_hash
+    assert response.data["invitation_token"] not in invitation.token_hash
+
+    # A second onboarding call must not collide on an empty/shared token_hash.
+    second = client.post(
+        "/api/v1/engagements/onboard-auditee/",
+        {
+            "slug": "onboarded-auditee-2",
+            "name": "Onboarded Auditee 2",
+            "administrator_email": "org-admin-2@example.test",
+            "auditee_mode": "firm_managed",
+        },
+        format="json",
+    )
+    assert second.status_code == 201, second.data
+    assert second.data["invitation_token"] != response.data["invitation_token"]
+
+    invited = get_user_model().objects.create(username="auditee-admin", email="org-admin@example.test")
+    invited_client = APIClient()
+    invited_client.force_authenticate(invited)
+    accepted = invited_client.post(f"/api/v1/invitations/{response.data['invitation_token']}/accept")
+    assert accepted.status_code == 200, accepted.data
+    assert Membership.all_objects.get(tenant=auditee, user=invited).role == Membership.Role.ORG_ADMIN
+    # Replay of an already-accepted invitation is rejected.
+    assert invited_client.post(f"/api/v1/invitations/{response.data['invitation_token']}/accept").status_code == 400
+    # A malformed/invalid token is rejected, not merely ignored.
+    assert invited_client.post("/api/v1/invitations/not-a-real-token/accept").status_code == 404
 
 
 def test_relationship_alone_never_grants_auditee_visibility():

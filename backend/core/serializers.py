@@ -17,6 +17,7 @@ from .models import (
     ComplianceGap,
     ControlAssignment,
     ControlEvidenceLink,
+    CustomRole,
     DataFlow,
     Engagement,
     EngagementMember,
@@ -109,7 +110,8 @@ def serializer_for(model, *, read_only_fields=()):
 OrganizationSerializer = serializer_for(Organization)
 WorkspaceSerializer = serializer_for(Workspace)
 ApplicationSerializer = serializer_for(Application)
-MembershipSerializer = serializer_for(Membership)
+MembershipSerializer = serializer_for(Membership, read_only_fields=("extra_permissions",))
+CustomRoleSerializer = serializer_for(CustomRole)
 TenantRelationshipSerializer = serializer_for(TenantRelationship)
 SubscriptionPlanSerializer = serializer_for(SubscriptionPlan)
 TenantSubscriptionSerializer = serializer_for(TenantSubscription)
@@ -365,6 +367,7 @@ SERIALIZERS = {
     Workspace: WorkspaceSerializer,
     Application: ApplicationSerializer,
     Membership: MembershipSerializer,
+    CustomRole: CustomRoleSerializer,
     TenantRelationship: TenantRelationshipSerializer,
     SubscriptionPlan: SubscriptionPlanSerializer,
     TenantSubscription: TenantSubscriptionSerializer,

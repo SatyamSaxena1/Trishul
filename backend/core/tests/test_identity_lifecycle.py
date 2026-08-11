@@ -49,6 +49,30 @@ def test_invitation_is_hashed_single_use_and_email_bound():
     assert client.post(f"/api/v1/invitations/{token}/accept").status_code == 400
 
 
+def test_invitation_rejects_an_expired_token():
+    tenant = Tenant.objects.create(slug="invite-expired", name="Invite expired")
+    admin = member(tenant, "expiry-admin")
+    invited = get_user_model().objects.create(username="expired-invitee", email="expired@example.test")
+    response = tenant_client(tenant, admin).post(
+        "/api/v1/tenant-invitations/",
+        {
+            "email": invited.email,
+            "role": Membership.Role.CONTROL_OWNER,
+            "expires_at": (timezone.now() + timedelta(days=1)).isoformat(),
+        },
+        format="json",
+    )
+    assert response.status_code == 201, response.data
+    invitation = TenantInvitation.all_objects.get(pk=response.data["id"])
+    invitation.expires_at = timezone.now() - timedelta(seconds=1)
+    invitation.save(update_fields=["expires_at"])
+
+    client = APIClient()
+    client.force_authenticate(invited)
+    assert client.post(f"/api/v1/invitations/{response.data['token']}/accept").status_code == 400
+    assert not Membership.all_objects.filter(tenant=tenant, user=invited).exists()
+
+
 def test_invitation_rejects_the_wrong_authenticated_email():
     tenant = Tenant.objects.create(slug="invite-email", name="Invite email")
     admin = member(tenant, "email-admin")
