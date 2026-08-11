@@ -23,6 +23,9 @@ AI Trishul is a multi-tenant GRC and deployment-assurance platform connecting ev
 
 The Python language pack is intentionally marked `experimental` until representative first-customer repositories establish its precision, recall, framework coverage, and maintenance acceptance.
 
+Product priorities for the post-MVP pilot are governed by [ADR-0001: post-pilot primary
+investment](docs/decisions/0001-post-pilot-primary-investment.md).
+
 ## Development
 
 For browser development without an OIDC provider, use the debug-only [local authentication setup](docs/local-development.md).
